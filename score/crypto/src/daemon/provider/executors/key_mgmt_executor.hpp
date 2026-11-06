@@ -91,6 +91,23 @@ class KeyManagementExecutor final
     [[nodiscard]] Expected<common::ResponseParameters, score::crypto::daemon::common::DaemonErrorCode> HandleClear(
         const KeyMgmtExecutionContext& ctx,
         common::RequestParameters& request);
+    [[nodiscard]] Expected<common::ResponseParameters, score::crypto::daemon::common::DaemonErrorCode>
+    HandleGenerateToSlot(const KeyMgmtExecutionContext& ctx, common::RequestParameters& request);
+
+    [[nodiscard]] Expected<common::ResponseParameters, score::crypto::daemon::common::DaemonErrorCode>
+    HandleImportToSlot(const KeyMgmtExecutionContext& ctx, common::RequestParameters& request);
+
+    [[nodiscard]] Expected<common::ResponseParameters, score::crypto::daemon::common::DaemonErrorCode> HandlePersist(
+        const KeyMgmtExecutionContext& ctx,
+        common::RequestParameters& request);
+
+    /// Resolve the slot at request[0] and check that @p ctx may write a key of
+    /// @p algorithm into it: client in allowed_write_uids, context provider is
+    /// the slot's primary provider, slot algorithm matches, slot is empty.
+    [[nodiscard]] Expected<const key_management::KeySlotConfig*, score::crypto::daemon::common::DaemonErrorCode>
+    ResolveWritableSlot(const KeyMgmtExecutionContext& ctx,
+                        const common::RequestParameters& request,
+                        const ::score::crypto::AlgorithmDescriptor& algorithm);
 };
 
 }  // namespace score::crypto::daemon::provider::crypto_executor

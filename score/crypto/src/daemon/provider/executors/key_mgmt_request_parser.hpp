@@ -158,22 +158,25 @@ ExtractOptionalFormat(const common::RequestParameters& request, std::size_t inde
 ///
 /// key_data borrows the IPC buffer (valid for the call only); the factory's
 /// ImportKey() copies the bytes before returning.
+///
+/// @p first shifts the layout for requests that carry leading parameters
+/// (e.g. the target slot of KEY_IMPORT_TO_SLOT).
 [[nodiscard]] inline Expected<key_management::KeyImportRequest, score::crypto::daemon::common::DaemonErrorCode>
-BuildImportRequest(const common::RequestParameters& request)
+BuildImportRequest(const common::RequestParameters& request, std::size_t first = 0U)
 {
-    auto algo = ExtractAlgorithm(request, 0U);
+    auto algo = ExtractAlgorithm(request, first);
     if (!algo.has_value())
     {
         return score::crypto::make_unexpected(algo.error());
     }
 
-    auto key_data = ExtractDataBuffer(request, 3U);
+    auto key_data = ExtractDataBuffer(request, first + 3U);
     if (!key_data.has_value())
     {
         return score::crypto::make_unexpected(key_data.error());
     }
 
-    auto format = ExtractOptionalFormat(request, 2U);
+    auto format = ExtractOptionalFormat(request, first + 2U);
     if (!format.has_value())
     {
         return score::crypto::make_unexpected(format.error());
@@ -192,7 +195,7 @@ BuildImportRequest(const common::RequestParameters& request)
     req.key_data_size = key_data.value().size();
     req.format = format.value();
 
-    const auto perm = ExtractOptionalPermissions(request, 1U);
+    const auto perm = ExtractOptionalPermissions(request, first + 1U);
     if (perm.has_value())
     {
         req.permissions = perm.value();
@@ -207,10 +210,12 @@ BuildImportRequest(const common::RequestParameters& request)
 ///   request[0] = algorithm              (string_view, required; must name a catalog row)
 ///   request[1] = permissions            (uint32_t,    optional)
 ///   request[2] = public_key_permissions (uint32_t,    optional, asymmetric only)
+///
+/// @p first shifts the layout as for BuildImportRequest().
 [[nodiscard]] inline Expected<key_management::KeyGenerationRequest, score::crypto::daemon::common::DaemonErrorCode>
-BuildGenerationRequest(const common::RequestParameters& request)
+BuildGenerationRequest(const common::RequestParameters& request, std::size_t first = 0U)
 {
-    auto algo = ExtractAlgorithm(request, 0U);
+    auto algo = ExtractAlgorithm(request, first);
     if (!algo.has_value())
     {
         return score::crypto::make_unexpected(algo.error());
@@ -226,7 +231,7 @@ BuildGenerationRequest(const common::RequestParameters& request)
     key_management::KeyGenerationRequest req{};
     req.algorithm = descriptor.value();
 
-    const auto perm = ExtractOptionalPermissions(request, 1U);
+    const auto perm = ExtractOptionalPermissions(request, first + 1U);
     if (perm.has_value())
     {
         req.permissions = perm.value();
@@ -236,7 +241,7 @@ BuildGenerationRequest(const common::RequestParameters& request)
     // unrestricted" — the contract documented on GenerateKeyParams. The public
     // half of a key pair is public information, so withholding kVerify/kEncrypt
     // by default would cost compatibility without buying confidentiality.
-    req.public_key_permissions = ExtractOptionalPermissions(request, 2U);
+    req.public_key_permissions = ExtractOptionalPermissions(request, first + 2U);
 
     return req;
 }

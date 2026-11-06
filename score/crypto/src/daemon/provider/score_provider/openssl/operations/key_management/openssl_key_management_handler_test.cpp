@@ -26,6 +26,7 @@
 #include "score/crypto/src/daemon/common/actors.hpp"
 #include "score/crypto/src/daemon/config/src/flatbuffer_config_parser.hpp"
 #include "score/crypto/src/daemon/data_manager/data_manager.hpp"
+#include "score/crypto/src/daemon/key_management/core/key_entry.hpp"
 #include "score/crypto/src/daemon/key_management/core/key_management_service.hpp"
 #include "score/crypto/src/daemon/key_management/interfaces/key_management_operations.hpp"
 #include "score/crypto/src/daemon/key_management/nodes/key_slot_data_node.hpp"
@@ -556,4 +557,222 @@ TEST_F(KeyClearTest, ClearKey_InvalidSlotNode_ReturnsInvalidArgument)
 
     ASSERT_FALSE(clear.has_value());
     EXPECT_EQ(clear.error(), common::DaemonErrorCode::kInvalidArgument);
+}
+
+// ============================================================================
+// Storing keys into slots (KEY_GENERATE_TO_SLOT, KEY_IMPORT_TO_SLOT, KEY_PERSIST)
+// ============================================================================
+
+class KeyManagementStoreToSlotTest : public KeyManagementHandlerTest
+{
+  protected:
+    void SetUp() override
+    {
+        KeyManagementHandlerTest::SetUp();
+        m_dir = std::filesystem::temp_directory_path() /
+                ("score_crypto_store_to_slot_" +
+                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(m_dir);
+    }
+
+    void TearDown() override
+    {
+        std::filesystem::remove_all(m_dir);
+    }
+
+    /// Register an empty AES-256/MAC slot whose deployment descriptor points at
+    /// a key file that does not exist yet. Returns the slot data node id.
+    dm::DataNodeId AddEmptySlot(const std::string& name,
+                                std::vector<std::uint32_t> write_uids = {kWriterUid},
+                                std::vector<common::ProviderId> provider_ids = {kProviderId})
+    {
+        const auto descriptor = m_dir / (name + ".kv");
+        std::ofstream kv{descriptor};
+        kv << "[metadata]\navailability=active\n[key]\nkey_path=" << KeyPath(name) << "\n";
+        kv.close();
+
+        km::KeySlotConfig cfg{};
+        cfg.slot_name = "store/" + name;
+        cfg.algorithm = "AES-256";
+        cfg.provider_ids = std::move(provider_ids);
+        cfg.allowed_operations = score::crypto::KeyOperationPermission::kMac;
+        cfg.access_policy.allowed_uids = {kWriterUid};
+        cfg.access_policy.allowed_write_uids = std::move(write_uids);
+        cfg.deployment_path = descriptor.string();
+        cfg.deployment_format = "kv";
+        m_slot_registry->RegisterSlot(std::move(cfg));
+        return ResolveSlotToDataNode("store/" + name, kAllowedClient);
+    }
+
+    std::string KeyPath(const std::string& name) const
+    {
+        return (m_dir / "keys" / (name + ".key")).string();
+    }
+
+    std::vector<std::uint8_t> ReadKeyFile(const std::string& name) const
+    {
+        std::ifstream in{KeyPath(name), std::ios::binary};
+        return {std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    }
+
+    score::crypto::Expected<common::ResponseParameters, common::DaemonErrorCode> Exec(std::uint16_t op,
+                                                                                      common::RequestParameters params)
+    {
+        return m_handler->Execute({score::crypto::daemon::common::actors::OP_ACTOR_KEY_MANAGEMENT, op}, params);
+    }
+
+    score::crypto::Expected<common::ResponseParameters, common::DaemonErrorCode> ImportToSlot(
+        dm::DataNodeId slot,
+        const std::string& algorithm)
+    {
+        common::RequestParameters params;
+        params.push_back(static_cast<std::uint64_t>(slot));
+        params.push_back(std::string_view(algorithm));
+        params.push_back(static_cast<std::uint32_t>(score::crypto::KeyOperationPermission::kMac));
+        params.push_back(static_cast<std::uint32_t>(score::crypto::FormatType::kRaw));
+        params.push_back(score::cpp::span<const std::uint8_t>{m_key.data(), m_key.size()});
+        return Exec(km::operations::KEY_IMPORT_TO_SLOT, std::move(params));
+    }
+
+    score::crypto::Expected<common::ResponseParameters, common::DaemonErrorCode> GenerateToSlot(
+        dm::DataNodeId slot,
+        const std::string& algorithm)
+    {
+        common::RequestParameters params;
+        params.push_back(static_cast<std::uint64_t>(slot));
+        params.push_back(std::string_view(algorithm));
+        return Exec(km::operations::KEY_GENERATE_TO_SLOT, std::move(params));
+    }
+
+    /// Generate a volatile AES-256 key with @p perms; returns its node id.
+    std::uint64_t GenerateVolatile(score::crypto::KeyOperationPermission perms)
+    {
+        common::RequestParameters params;
+        params.push_back(std::string_view("AES-256"));
+        params.push_back(static_cast<std::uint32_t>(perms));
+        auto res = Exec(km::operations::KEY_GENERATE, std::move(params));
+        return res.has_value() ? std::get<std::uint64_t>(res.value()[0]) : 0U;
+    }
+
+    score::crypto::Expected<common::ResponseParameters, common::DaemonErrorCode> Persist(dm::DataNodeId slot,
+                                                                                         std::uint64_t key)
+    {
+        common::RequestParameters params;
+        params.push_back(static_cast<std::uint64_t>(slot));
+        params.push_back(key);
+        return Exec(km::operations::KEY_PERSIST, std::move(params));
+    }
+
+    static constexpr std::uint32_t kWriterUid = 1000U;
+    std::filesystem::path m_dir;
+    const std::vector<std::uint8_t> m_key = std::vector<std::uint8_t>(32U, 0x5AU);
+};
+
+TEST_F(KeyManagementStoreToSlotTest, ImportToSlot_StoresRawBytesAndSlotLoads)
+{
+    const auto slot = AddEmptySlot("import");
+    ASSERT_NE(slot, 0U);
+
+    auto result = ImportToSlot(slot, "AES-256");
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+
+    EXPECT_EQ(ReadKeyFile("import"), m_key);
+    const auto perms = std::filesystem::status(KeyPath("import")).permissions() & std::filesystem::perms::all;
+    EXPECT_EQ(perms, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+
+    common::RequestParameters load;
+    load.push_back(static_cast<std::uint64_t>(slot));
+    auto loaded = Exec(km::operations::KEY_LOAD, std::move(load));
+    ASSERT_TRUE(loaded.has_value());
+    auto handle = m_service->PeekKeyHandle(kAllowedClient, std::get<std::uint64_t>(loaded.value()[0]));
+    ASSERT_TRUE(handle.has_value());
+    EXPECT_EQ(handle.value().permissions, score::crypto::KeyOperationPermission::kMac);
+}
+
+TEST_F(KeyManagementStoreToSlotTest, GenerateToSlot_StoresFreshKeyOfSlotSize)
+{
+    const auto slot = AddEmptySlot("generate");
+    ASSERT_NE(slot, 0U);
+
+    auto result = GenerateToSlot(slot, "AES-256");
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+
+    EXPECT_EQ(ReadKeyFile("generate").size(), 32U);
+    common::RequestParameters info;
+    info.push_back(static_cast<std::uint64_t>(slot));
+    auto state = Exec(km::operations::KEY_SLOT_INFO, std::move(info));
+    ASSERT_TRUE(state.has_value());
+    EXPECT_EQ(std::get<std::uint64_t>(state.value()[0]),
+              static_cast<std::uint64_t>(score::crypto::KeySlotState::kOccupied));
+}
+
+TEST_F(KeyManagementStoreToSlotTest, StoreIntoOccupiedSlot_IsRefused)
+{
+    const auto slot = AddEmptySlot("occupied");
+    ASSERT_TRUE(ImportToSlot(slot, "AES-256").has_value());
+
+    auto again = GenerateToSlot(slot, "AES-256");
+    ASSERT_FALSE(again.has_value());
+    EXPECT_EQ(again.error(), common::DaemonErrorCode::kKeySlotOccupied);
+    EXPECT_EQ(ReadKeyFile("occupied"), m_key);
+}
+
+TEST_F(KeyManagementStoreToSlotTest, AlgorithmNotMatchingSlot_IsRefused)
+{
+    const auto slot = AddEmptySlot("mismatch");
+
+    auto result = ImportToSlot(slot, "AES-128");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), common::DaemonErrorCode::kAlgorithmMismatch);
+    EXPECT_FALSE(std::filesystem::exists(KeyPath("mismatch")));
+}
+
+TEST_F(KeyManagementStoreToSlotTest, ClientWithoutWriteAccess_IsRefused)
+{
+    const auto slot = AddEmptySlot("read-only", /*write_uids=*/{0U});
+
+    auto result = GenerateToSlot(slot, "AES-256");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), common::DaemonErrorCode::kAccessDenied);
+    EXPECT_FALSE(std::filesystem::exists(KeyPath("read-only")));
+}
+
+TEST_F(KeyManagementStoreToSlotTest, SecondaryProvider_IsRefused)
+{
+    constexpr common::ProviderId kOtherPrimary = 7;
+    const auto slot = AddEmptySlot("secondary", {kWriterUid}, {kOtherPrimary, kProviderId});
+
+    auto result = ImportToSlot(slot, "AES-256");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), common::DaemonErrorCode::kAccessDenied);
+}
+
+TEST_F(KeyManagementStoreToSlotTest, Persist_StoresVolatileKeyWhichStaysUsable)
+{
+    const auto slot = AddEmptySlot("persist");
+    const auto key =
+        GenerateVolatile(score::crypto::KeyOperationPermission::kMac | score::crypto::KeyOperationPermission::kExport);
+    ASSERT_NE(key, 0U);
+
+    auto result = Persist(slot, key);
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+
+    // The volatile key is still registered and holds the bytes now in the slot.
+    auto entry = m_service->ResolveKeyForOperation(kAllowedClient, key);
+    ASSERT_TRUE(entry.has_value());
+    auto exported = entry.value()->GetKeyHandler()->Export();
+    ASSERT_TRUE(exported.has_value());
+    EXPECT_EQ(exported.value().bytes, ReadKeyFile("persist"));
+}
+
+TEST_F(KeyManagementStoreToSlotTest, Persist_KeyNarrowerThanSlot_IsRefused)
+{
+    const auto slot = AddEmptySlot("narrow");
+    const auto key = GenerateVolatile(score::crypto::KeyOperationPermission::kEncrypt);
+    ASSERT_NE(key, 0U);
+
+    auto result = Persist(slot, key);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), common::DaemonErrorCode::kKeyOperationNotPermitted);
+    EXPECT_FALSE(std::filesystem::exists(KeyPath("narrow")));
 }

@@ -2193,3 +2193,39 @@ TEST_F(OpenSslKeyHandlerTest, SerializeForStorage_ReleasedHandler_Fails)
 
     EXPECT_FALSE(gen.value()->SerializeForStorage().has_value());
 }
+
+TEST_F(OpenSslKeyHandlerTest, SerializePublicKeyForStorage_EcKeyPair_StoresSubjectPublicKeyInfo)
+{
+    km::KeyGenerationRequest req{};
+    req.algorithm = Row("ECDSA-P256");
+    req.permissions = score::crypto::KeyOperationPermission::kSign;
+    auto gen = m_factory->GenerateKey(req);
+    ASSERT_TRUE(gen.has_value());
+
+    auto pub = gen.value()->SerializePublicKeyForStorage();
+    ASSERT_TRUE(pub.has_value());
+    auto priv = gen.value()->SerializeForStorage();
+    ASSERT_TRUE(priv.has_value());
+    EXPECT_NE(pub.value().bytes, priv.value().bytes);
+
+    // The public form reloads as a public-only key of the same pair.
+    auto reloaded =
+        Reimport(*m_factory, pub.value().bytes, "ECDSA-P256", score::crypto::KeyOperationPermission::kVerify);
+    ASSERT_NE(reloaded, nullptr);
+    auto restored = reloaded->SerializeForStorage();
+    ASSERT_TRUE(restored.has_value());
+    EXPECT_EQ(restored.value().bytes, pub.value().bytes);
+}
+
+TEST_F(OpenSslKeyHandlerTest, SerializePublicKeyForStorage_SymmetricKey_IsIncompatible)
+{
+    km::KeyGenerationRequest req{};
+    req.algorithm = Row("AES-256");
+    req.permissions = score::crypto::KeyOperationPermission::kMac;
+    auto gen = m_factory->GenerateKey(req);
+    ASSERT_TRUE(gen.has_value());
+
+    auto pub = gen.value()->SerializePublicKeyForStorage();
+    ASSERT_FALSE(pub.has_value());
+    EXPECT_EQ(pub.error(), score::crypto::daemon::common::DaemonErrorCode::kIncompatibleKeyType);
+}

@@ -67,17 +67,28 @@ class FileBackedSlotHandler final : public IKeySlotHandler
 
     /// Persist @p handler's key into the empty slot's key file.
     ///
-    /// Serialises the key with IKeyHandler::SerializeForStorage() (raw bytes for
-    /// symmetric keys, DER for asymmetric keys) and creates key_properties[kKeyPath]
-    /// with mode 0600 through CreatePrivateFileIfAbsent. An existing key file is never
-    /// replaced. The serialised buffer is zeroized before returning.
+    /// Serialises the key with IKeyHandler::SerializeForStorage() in its native
+    /// encoding (raw bytes for symmetric keys, DER for asymmetric keys) and creates
+    /// key_properties[kKeyPath] with mode 0600 through the writer, which never
+    /// replaces an existing file. The serialised buffer is zeroized before returning.
     ///
     /// @return kKeySlotOccupied if the key file already exists; kInvalidArgument
-    ///         if the descriptor names no key path; otherwise the load, serialise
-    ///         or write error.
+    ///         if the descriptor names no key path; kInvalidFormat if its
+    ///         key_format is not the native encoding; otherwise the load,
+    ///         serialise or write error.
     [[nodiscard]] score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode> StoreKey(
         const KeySlotConfig& slot,
         IKeyHandler& handler) override;
+
+    /// Persist an asymmetric key: PKCS#8 DER into @p private_slot and its
+    /// SubjectPublicKeyInfo DER into @p public_slot.
+    ///
+    /// The public key file is written first and removed again if the private
+    /// one cannot be written, so both slots are filled or neither.
+    ///
+    /// @return As StoreKey(); kInvalidArgument if both slots name the same file.
+    [[nodiscard]] score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode>
+    StoreKeyPair(const KeySlotConfig& private_slot, const KeySlotConfig& public_slot, IKeyHandler& handler) override;
 
     /// Return kOccupied if the key file exists, kEmpty otherwise.
     [[nodiscard]] score::crypto::Expected<score::crypto::KeySlotState, score::crypto::daemon::common::DaemonErrorCode>
@@ -97,6 +108,15 @@ class FileBackedSlotHandler final : public IKeySlotHandler
     GetSlotInfo(const KeySlotConfig& slot) override;
 
   private:
+    /// Key path of an empty @p slot whose key_format admits the native encoding.
+    [[nodiscard]] static score::crypto::Expected<std::string, score::crypto::daemon::common::DaemonErrorCode>
+    ResolveEmptyKeyPath(const KeySlotConfig& slot);
+
+    /// Write @p material to @p key_path through the writer, then zeroize it.
+    [[nodiscard]] score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode> WriteKeyFile(
+        const std::string& key_path,
+        SecureKeyBytes& material);
+
     IKeyFactory::Sptr m_factory;
     common::storage::FileWriter m_write_file;
 

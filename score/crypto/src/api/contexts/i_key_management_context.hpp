@@ -120,8 +120,10 @@ class IKeyManagementContext : public IContext
     ///
     /// Requires slot write access. params.algorithm must be the slot's algorithm.
     /// The stored key is used with the slot's configured allowed operations;
-    /// params.permissions do not apply to it. A public_slot for an asymmetric
-    /// algorithm is not supported yet (kUnsupportedOperation).
+    /// params.permissions do not apply to it. With a public_slot, both slots must
+    /// be empty, writable by the caller, owned by the same provider and configured
+    /// for params.algorithm; they are checked before anything is written and are
+    /// filled together or not at all.
     ///
     /// @return std::monostate on success; error if slot is occupied, policy violation, etc.
     virtual score::Result<std::monostate> GenerateKey(const CryptoResourceId& target_slot,

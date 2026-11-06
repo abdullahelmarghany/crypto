@@ -20,6 +20,7 @@
 #include "score/crypto/src/daemon/key_management/interfaces/i_key_slot_handler.hpp"
 #include "score/crypto/src/daemon/provider/executors/key_mgmt_context.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -101,13 +102,16 @@ class KeyManagementExecutor final
         const KeyMgmtExecutionContext& ctx,
         common::RequestParameters& request);
 
-    /// Resolve the slot at request[0] and check that @p ctx may write a key of
+    /// Resolve the slot @p slot_node_id and check that @p ctx may write a key of
     /// @p algorithm into it: client in allowed_write_uids, context provider is
-    /// the slot's primary provider, slot algorithm matches, slot is empty.
+    /// the slot's primary provider (else @p foreign_provider_error), slot
+    /// algorithm matches, slot is empty.
     [[nodiscard]] Expected<const key_management::KeySlotConfig*, score::crypto::daemon::common::DaemonErrorCode>
     ResolveWritableSlot(const KeyMgmtExecutionContext& ctx,
-                        const common::RequestParameters& request,
-                        const ::score::crypto::AlgorithmDescriptor& algorithm);
+                        std::uint64_t slot_node_id,
+                        const ::score::crypto::AlgorithmDescriptor& algorithm,
+                        score::crypto::daemon::common::DaemonErrorCode foreign_provider_error =
+                            score::crypto::daemon::common::DaemonErrorCode::kAccessDenied);
 };
 
 }  // namespace score::crypto::daemon::provider::crypto_executor

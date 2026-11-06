@@ -172,4 +172,31 @@ OpenSslKeyHandler::SerializeForStorage() const
     return out;
 }
 
+::score::crypto::Expected<key_management::SecureKeyBytes, ::score::crypto::daemon::common::DaemonErrorCode>
+OpenSslKeyHandler::SerializePublicKeyForStorage() const
+{
+    using ::score::crypto::daemon::common::DaemonErrorCode;
+    if (m_released)
+    {
+        return ::score::crypto::make_unexpected(DaemonErrorCode::kInternalError);
+    }
+    if (!m_pkey)
+    {
+        return ::score::crypto::make_unexpected(DaemonErrorCode::kIncompatibleKeyType);
+    }
+
+    unsigned char* der = nullptr;
+    const int der_len = i2d_PUBKEY(m_pkey.get(), &der);
+    if ((der_len <= 0) || (der == nullptr))
+    {
+        OPENSSL_free(der);
+        return ::score::crypto::make_unexpected(DaemonErrorCode::kOperationFailed);
+    }
+
+    key_management::SecureKeyBytes out;
+    out.bytes.assign(der, der + der_len);  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    OPENSSL_free(der);
+    return out;
+}
+
 }  // namespace score::crypto::daemon::provider::openssl

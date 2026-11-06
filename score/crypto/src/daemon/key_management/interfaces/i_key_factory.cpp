@@ -90,6 +90,20 @@ score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErr
 }
 
 score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode>
+IKeyFactory::GenerateKeyPairToSlots(const KeySlotConfig& private_slot,
+                                    const KeySlotConfig& public_slot,
+                                    const KeyGenerationRequest& request,
+                                    IKeySlotHandler& slot_handler)
+{
+    auto handler_result = GenerateKey(request);
+    if (!handler_result.has_value())
+    {
+        return score::crypto::make_unexpected(handler_result.error());
+    }
+    return slot_handler.StoreKeyPair(private_slot, public_slot, *handler_result.value());
+}
+
+score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode>
 IKeyFactory::ImportKeyToSlot(const KeySlotConfig& slot, const KeyImportRequest& request, IKeySlotHandler& slot_handler)
 {
     auto handler_result = ImportKey(request);

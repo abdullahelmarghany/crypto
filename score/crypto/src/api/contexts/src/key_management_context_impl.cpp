@@ -23,7 +23,6 @@
 
 #include "score/crypto/src/api/control_plane/i_connection.hpp"
 #include "score/crypto/src/daemon/common/actors.hpp"
-#include "score/crypto/src/daemon/common/algorithm_catalog.hpp"
 #include "score/crypto/src/daemon/control_plane/control_protocol.h"
 #include "score/crypto/src/daemon/key_management/interfaces/key_management_operations.hpp"
 #include "score/crypto/src/daemon/mediator/mediator_operations.hpp"
@@ -323,23 +322,20 @@ score::Result<std::monostate> KeyManagementContextImpl::GenerateKey(const Crypto
         return score::Result<std::monostate>{
             score::unexpect, MakeError(CryptoErrorCode::kInvalidArgument, "GenerateKey called with invalid slot type")};
     }
-    // public_slot is ignored for symmetric algorithms. The slot handlers store
-    // one key per slot, so a separate public-key slot is not supported yet.
-    const auto descriptor = GetAlgorithmDescriptor(params.algorithm);
-    const bool is_symmetric = descriptor.has_value() &&
-                              ((descriptor->key_type == KeyType::kSecret) || (descriptor->key_type == KeyType::kAes));
-    if (public_slot.has_value() && !is_symmetric)
+    if (public_slot.has_value() && (public_slot->type != ResourceType::kKeySlot))
     {
-        score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR: GenerateKey public_slot not supported";
+        score::mw::log::LogError()
+            << "[API][KeyMgmtContextImpl] ERROR: GenerateKey called with invalid public slot type";
         return score::Result<std::monostate>{
             score::unexpect,
-            MakeError(CryptoErrorCode::kUnsupportedOperation, "GenerateKey public_slot not supported")};
+            MakeError(CryptoErrorCode::kInvalidArgument, "GenerateKey called with invalid public slot type")};
     }
 
     auto request_builder = proto::ControlRequestBuilder()
                                .forDataNodeId(m_context_id)
                                .operation({actors::OP_ACTOR_KEY_MANAGEMENT, keymgmt_ops::KEY_GENERATE_TO_SLOT})
                                .with_in_val_uint64(target_slot.id)
+                               .with_in_val_uint64(public_slot.has_value() ? public_slot->id : 0U)
                                .with_in_string(params.algorithm)
                                .with_in_val_uint32(static_cast<std::uint32_t>(params.permissions));
     if (params.public_key_permissions.has_value())

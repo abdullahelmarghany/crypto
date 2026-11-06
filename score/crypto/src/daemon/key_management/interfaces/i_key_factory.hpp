@@ -131,6 +131,16 @@ class IKeyFactory
     [[nodiscard]] virtual score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode>
     GenerateKeyToSlot(const KeySlotConfig& slot, const KeyGenerationRequest& request, IKeySlotHandler& slot_handler);
 
+    /// Generate an asymmetric key pair into a private-key slot and a public-key slot.
+    ///
+    /// Both slots are filled or neither.
+    /// Default: GenerateKey(request) + slot_handler.StoreKeyPair(private_slot, public_slot, *handler).
+    [[nodiscard]] virtual score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode>
+    GenerateKeyPairToSlots(const KeySlotConfig& private_slot,
+                           const KeySlotConfig& public_slot,
+                           const KeyGenerationRequest& request,
+                           IKeySlotHandler& slot_handler);
+
     /// Import raw key material directly into a persistent slot.
     ///
     /// Default: ImportKey(request) + slot_handler.StoreKey(slot, *handler).

@@ -25,6 +25,14 @@ score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErr
     return score::crypto::make_unexpected(score::crypto::daemon::common::DaemonErrorCode::kUnsupportedOperation);
 }
 
+score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode> IKeySlotHandler::StoreKeyPair(
+    const KeySlotConfig& /*private_slot*/,
+    const KeySlotConfig& /*public_slot*/,
+    IKeyHandler& /*handler*/)
+{
+    return score::crypto::make_unexpected(score::crypto::daemon::common::DaemonErrorCode::kUnsupportedOperation);
+}
+
 score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode> IKeySlotHandler::ClearSlot(
     const KeySlotConfig& /*slot*/)
 {

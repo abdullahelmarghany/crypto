@@ -16,14 +16,18 @@
 ///
 /// Covers GenerateKey and ImportKey into a slot and PersistKey of an ephemeral
 /// key, each followed by LoadKey and an HMAC-SHA256 computation with the stored
-/// key. Each test writes its own empty slot (see integration_test_config.json);
-/// a slot cannot be emptied again, so every test runs once per daemon instance.
+/// key, and GenerateKey of an ECDSA key pair into a private and a public slot. Each test writes its own empty slot (see
+/// integration_test_config.json); a slot cannot be emptied again, so every test runs once per daemon instance.
 
 #include "score/crypto/src/api/config/key_management_context_config.hpp"
 #include "score/crypto/src/api/config/key_operation_params.hpp"
 #include "score/crypto/src/api/config/mac_context_config.hpp"
+#include "score/crypto/src/api/config/sign_context_config.hpp"
+#include "score/crypto/src/api/config/verify_signature_context_config.hpp"
 #include "score/crypto/src/api/contexts/i_key_management_context.hpp"
 #include "score/crypto/src/api/contexts/i_mac_context.hpp"
+#include "score/crypto/src/api/contexts/i_sign_context.hpp"
+#include "score/crypto/src/api/contexts/i_verify_signature_context.hpp"
 #include "score/crypto/src/api/crypto_stack_factory.hpp"
 #include "score/crypto/src/api/i_crypto_context.hpp"
 #include "score/crypto/src/api/i_crypto_stack.hpp"
@@ -63,6 +67,11 @@ constexpr std::size_t kMacSize = 32U;
 constexpr std::string_view kGenerateSlot = "Store_Generate_OpenSSL";
 constexpr std::string_view kImportSlot = "Store_Import_OpenSSL";
 constexpr std::string_view kPersistSlot = "Store_Persist_OpenSSL";
+constexpr std::string_view kKeyPairPrivateSlot = "Store_KeyPair_Private_OpenSSL";
+constexpr std::string_view kKeyPairPublicSlot = "Store_KeyPair_Public_OpenSSL";
+constexpr std::string_view kKeyPairAlgorithm = "ECDSA-P256";
+constexpr std::string_view kSignatureAlgorithm = "ECDSA-P256-SHA256";
+constexpr std::size_t kSignatureSize = 64U;
 
 std::string GetTestVectorPath(const std::string_view relative_path)
 {
@@ -203,6 +212,44 @@ TEST_F(KeySlotStoreTest, PersistKey_SlotKeyMatchesEphemeralKey)
     EXPECT_EQ(ComputeMac(loaded.value(), input_), ephemeral_mac);
 
     auto again = key_mgmt_->PersistKey(slot, ephemeral.value());
+    ASSERT_FALSE(again.has_value());
+    EXPECT_EQ(*again.error(), static_cast<score::result::ErrorCode>(CryptoErrorCode::kKeySlotOccupied))
+        << again.error().Message();
+}
+
+TEST_F(KeySlotStoreTest, GenerateKeyPairIntoSlots_PublicSlotVerifiesPrivateSlotSignature)
+{
+    const auto private_slot = ResolveSlot(kKeyPairPrivateSlot);
+    const auto public_slot = ResolveSlot(kKeyPairPublicSlot);
+
+    GenerateKeyParams params;
+    params.SetAlgorithm(std::string{kKeyPairAlgorithm});
+    auto stored = key_mgmt_->GenerateKey(private_slot, public_slot, params);
+    ASSERT_TRUE(stored.has_value()) << "GenerateKey into key pair slots failed: " << stored.error().Message();
+
+    auto private_key = key_mgmt_->LoadKey(private_slot);
+    ASSERT_TRUE(private_key.has_value()) << "LoadKey from private slot failed";
+    auto public_key = key_mgmt_->LoadKey(public_slot);
+    ASSERT_TRUE(public_key.has_value()) << "LoadKey from public slot failed";
+
+    SignContextConfig sign_config;
+    sign_config.SetAlgorithm(std::string{kSignatureAlgorithm}).SetKey(private_key.value());
+    auto sign = ctx_->CreateSignContext(sign_config);
+    ASSERT_TRUE(sign.has_value()) << "Failed to create sign context";
+    std::vector<std::uint8_t> signature(kSignatureSize, 0U);
+    auto written = sign.value()->SingleShot({input_.data(), input_.size()}, {signature.data(), signature.size()});
+    ASSERT_TRUE(written.has_value()) << "Signing with the private slot key failed";
+
+    VerifySignatureContextConfig verify_config;
+    verify_config.SetAlgorithm(std::string{kSignatureAlgorithm}).SetKey(public_key.value());
+    auto verify = ctx_->CreateVerifySignatureContext(verify_config);
+    ASSERT_TRUE(verify.has_value()) << "Failed to create verify context";
+    auto verified = verify.value()->SingleShot({input_.data(), input_.size()}, {signature.data(), signature.size()});
+    ASSERT_TRUE(verified.has_value()) << "Verification call failed";
+    EXPECT_TRUE(verified.value()) << "The public slot must hold the public half of the private slot key";
+
+    // Both slots are occupied now; a second pair must not replace either.
+    auto again = key_mgmt_->GenerateKey(private_slot, public_slot, params);
     ASSERT_FALSE(again.has_value());
     EXPECT_EQ(*again.error(), static_cast<score::result::ErrorCode>(CryptoErrorCode::kKeySlotOccupied))
         << again.error().Message();

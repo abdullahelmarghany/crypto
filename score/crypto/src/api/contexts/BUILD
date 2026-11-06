@@ -105,7 +105,6 @@ cc_library(
         "//score/crypto/src/api/types:types",
         "//score/crypto/src/api/control_plane",
         "//score/crypto/src/api/data_plane:data_plane_client",
-        "//score/crypto/src/daemon/common:algorithm_catalog",
     ],
 )
 

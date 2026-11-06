@@ -89,6 +89,15 @@ class IKeyHandler
     {
         return score::crypto::make_unexpected(score::crypto::daemon::common::DaemonErrorCode::kUnsupportedOperation);
     }
+
+    /// Serialise only the public half of an asymmetric key for a public-key slot
+    /// (IKeySlotHandler::StoreKeyPair), in the form IKeyFactory::ImportKey reads.
+    /// Default: kUnsupportedOperation.
+    [[nodiscard]] virtual score::crypto::Expected<SecureKeyBytes, score::crypto::daemon::common::DaemonErrorCode>
+    SerializePublicKeyForStorage() const
+    {
+        return score::crypto::make_unexpected(score::crypto::daemon::common::DaemonErrorCode::kUnsupportedOperation);
+    }
 };
 
 }  // namespace score::crypto::daemon::key_management

@@ -80,6 +80,15 @@ class IKeySlotHandler
     [[nodiscard]] virtual score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode>
     StoreKey(const KeySlotConfig& slot, IKeyHandler& handler);
 
+    /// Store an asymmetric key into two slots: the full key into @p private_slot
+    /// and its public half into @p public_slot.
+    ///
+    /// Both slots are filled or neither: if the second store fails, the first is
+    /// undone. Used by GenerateKeyPairToSlots.
+    /// Default: returns kNotSupported.
+    [[nodiscard]] virtual score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode>
+    StoreKeyPair(const KeySlotConfig& private_slot, const KeySlotConfig& public_slot, IKeyHandler& handler);
+
     /// Erase key material from a persistent slot.
     ///
     /// After this call GetSlotState() must return kEmpty.

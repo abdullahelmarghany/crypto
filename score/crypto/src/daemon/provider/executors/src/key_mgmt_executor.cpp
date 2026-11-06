@@ -526,17 +526,11 @@ Expected<common::ResponseParameters, score::crypto::daemon::common::DaemonErrorC
 
 Expected<const key_management::KeySlotConfig*, score::crypto::daemon::common::DaemonErrorCode>
 KeyManagementExecutor::ResolveWritableSlot(const KeyMgmtExecutionContext& ctx,
-                                           const common::RequestParameters& request,
-                                           const ::score::crypto::AlgorithmDescriptor& algorithm)
+                                           std::uint64_t slot_node_id,
+                                           const ::score::crypto::AlgorithmDescriptor& algorithm,
+                                           score::crypto::daemon::common::DaemonErrorCode foreign_provider_error)
 {
-    auto slot_nid_res = km_parse::ExtractUint64(request, 0U);
-    if (!slot_nid_res.has_value())
-    {
-        score::mw::log::LogError() << LOG_PREFIX << "ResolveWritableSlot: invalid slot node id";
-        return score::crypto::make_unexpected(slot_nid_res.error());
-    }
-
-    auto slot_res = m_service->ResolveSlotForOperation(ctx.client_id, slot_nid_res.value());
+    auto slot_res = m_service->ResolveSlotForOperation(ctx.client_id, slot_node_id);
     if (!slot_res.has_value())
     {
         score::mw::log::LogError() << LOG_PREFIX << "ResolveWritableSlot: slot resolution failed";
@@ -557,7 +551,7 @@ KeyManagementExecutor::ResolveWritableSlot(const KeyMgmtExecutionContext& ctx,
     {
         score::mw::log::LogError() << LOG_PREFIX << "ResolveWritableSlot: provider " << ctx.provider_id
                                    << " is not the primary provider of slot " << slot->slot_name;
-        return score::crypto::make_unexpected(provider_res.error());
+        return score::crypto::make_unexpected(foreign_provider_error);
     }
 
     const auto slot_algorithm = ::score::crypto::GetAlgorithmDescriptor(slot->algorithm);
@@ -589,38 +583,71 @@ KeyManagementExecutor::ResolveWritableSlot(const KeyMgmtExecutionContext& ctx,
 // HandleGenerateToSlot
 //
 // Parameter layout:
-//   request[0]  = slot_node_id (uint64_t)
-//   request[1]  = algorithm    (string_view)
-//   request[2]  = permissions  (uint32_t, optional, ignored: see below)
-//   request[3]  = public_key_permissions (uint32_t, optional, ignored)
+//   request[0]  = slot_node_id        (uint64_t)
+//   request[1]  = public_slot_node_id (uint64_t, 0 = none)
+//   request[2]  = algorithm           (string_view)
+//   request[3]  = permissions         (uint32_t, optional, ignored: see below)
+//   request[4]  = public_key_permissions (uint32_t, optional, ignored)
 // Response:
 //   output[0]   = 0 (success)
 //
 // The stored key is reloaded with the slot's allowed_operations, so the slot
 // configuration, not the request, decides what the key may be used for.
+// For an asymmetric algorithm with a public slot, both slots are checked
+// before anything is written and are then filled together; for a symmetric
+// algorithm the public slot is ignored.
 // ---------------------------------------------------------------------------
 
 Expected<common::ResponseParameters, score::crypto::daemon::common::DaemonErrorCode>
 KeyManagementExecutor::HandleGenerateToSlot(const KeyMgmtExecutionContext& ctx, common::RequestParameters& request)
 {
-    auto gen_req = km_parse::BuildGenerationRequest(request, 1U);
-    if (!gen_req.has_value())
+    auto slot_nid_res = km_parse::ExtractUint64(request, 0U);
+    auto public_nid_res = km_parse::ExtractUint64(request, 1U);
+    auto gen_req = km_parse::BuildGenerationRequest(request, 2U);
+    if ((!slot_nid_res.has_value()) || (!public_nid_res.has_value()) || (!gen_req.has_value()))
     {
         score::mw::log::LogError() << LOG_PREFIX << "HandleGenerateToSlot: invalid request parameters";
-        return score::crypto::make_unexpected(gen_req.error());
+        return score::crypto::make_unexpected(score::crypto::daemon::common::DaemonErrorCode::kInvalidArgument);
     }
+    const auto& algorithm = gen_req.value().algorithm;
 
-    auto slot_res = ResolveWritableSlot(ctx, request, gen_req.value().algorithm);
+    auto slot_res = ResolveWritableSlot(ctx, slot_nid_res.value(), algorithm);
     if (!slot_res.has_value())
     {
         return score::crypto::make_unexpected(slot_res.error());
     }
 
-    auto store_res = m_factory->GenerateKeyToSlot(*slot_res.value(), gen_req.value(), *m_slot_handler);
-    if (!store_res.has_value())
+    const bool symmetric = (algorithm.key_type == ::score::crypto::KeyType::kSecret) ||
+                           (algorithm.key_type == ::score::crypto::KeyType::kAes);
+    const std::uint64_t public_nid = symmetric ? 0U : public_nid_res.value();
+    if (public_nid == 0U)
     {
-        score::mw::log::LogError() << LOG_PREFIX << "HandleGenerateToSlot: GenerateKeyToSlot failed";
-        return score::crypto::make_unexpected(store_res.error());
+        auto store_res = m_factory->GenerateKeyToSlot(*slot_res.value(), gen_req.value(), *m_slot_handler);
+        if (!store_res.has_value())
+        {
+            score::mw::log::LogError() << LOG_PREFIX << "HandleGenerateToSlot: GenerateKeyToSlot failed";
+            return score::crypto::make_unexpected(store_res.error());
+        }
+    }
+    else
+    {
+        if (public_nid == slot_nid_res.value())
+        {
+            score::mw::log::LogError() << LOG_PREFIX << "HandleGenerateToSlot: public slot equals private slot";
+            return score::crypto::make_unexpected(score::crypto::daemon::common::DaemonErrorCode::kInvalidArgument);
+        }
+        auto public_slot_res = ResolveWritableSlot(ctx, public_nid, algorithm);
+        if (!public_slot_res.has_value())
+        {
+            return score::crypto::make_unexpected(public_slot_res.error());
+        }
+        auto store_res = m_factory->GenerateKeyPairToSlots(
+            *slot_res.value(), *public_slot_res.value(), gen_req.value(), *m_slot_handler);
+        if (!store_res.has_value())
+        {
+            score::mw::log::LogError() << LOG_PREFIX << "HandleGenerateToSlot: GenerateKeyPairToSlots failed";
+            return score::crypto::make_unexpected(store_res.error());
+        }
     }
 
     common::ResponseParameters output;
@@ -651,7 +678,14 @@ KeyManagementExecutor::HandleImportToSlot(const KeyMgmtExecutionContext& ctx, co
         return score::crypto::make_unexpected(import_req.error());
     }
 
-    auto slot_res = ResolveWritableSlot(ctx, request, import_req.value().algorithm);
+    auto slot_nid_res = km_parse::ExtractUint64(request, 0U);
+    if (!slot_nid_res.has_value())
+    {
+        score::mw::log::LogError() << LOG_PREFIX << "HandleImportToSlot: invalid slot node id";
+        return score::crypto::make_unexpected(slot_nid_res.error());
+    }
+
+    auto slot_res = ResolveWritableSlot(ctx, slot_nid_res.value(), import_req.value().algorithm);
     if (!slot_res.has_value())
     {
         return score::crypto::make_unexpected(slot_res.error());
@@ -678,7 +712,8 @@ KeyManagementExecutor::HandleImportToSlot(const KeyMgmtExecutionContext& ctx, co
 // Response:
 //   output[0]   = 0 (success)
 //
-// The volatile key stays registered and usable. Its permissions must cover
+// The key must belong to the slot's primary provider (kKeyNotExportable
+// otherwise). The volatile key stays registered and usable. Its permissions must cover
 // the slot's allowed_operations: a key restricted to e.g. MAC must not come
 // back from the slot with wider rights.
 // ---------------------------------------------------------------------------
@@ -686,11 +721,12 @@ KeyManagementExecutor::HandleImportToSlot(const KeyMgmtExecutionContext& ctx, co
 Expected<common::ResponseParameters, score::crypto::daemon::common::DaemonErrorCode>
 KeyManagementExecutor::HandlePersist(const KeyMgmtExecutionContext& ctx, common::RequestParameters& request)
 {
+    auto slot_nid_res = km_parse::ExtractUint64(request, 0U);
     auto key_nid_res = km_parse::ExtractUint64(request, 1U);
-    if (!key_nid_res.has_value())
+    if ((!slot_nid_res.has_value()) || (!key_nid_res.has_value()))
     {
-        score::mw::log::LogError() << LOG_PREFIX << "HandlePersist: invalid key node id";
-        return score::crypto::make_unexpected(key_nid_res.error());
+        score::mw::log::LogError() << LOG_PREFIX << "HandlePersist: invalid slot or key node id";
+        return score::crypto::make_unexpected(score::crypto::daemon::common::DaemonErrorCode::kInvalidArgument);
     }
 
     // Hold the KeyEntry for the whole operation so a concurrent release cannot
@@ -707,11 +743,15 @@ KeyManagementExecutor::HandlePersist(const KeyMgmtExecutionContext& ctx, common:
     if (handle.provider_id != ctx.provider_id)
     {
         score::mw::log::LogError() << LOG_PREFIX << "HandlePersist: key provider " << handle.provider_id
-                                   << " does not match context provider " << ctx.provider_id;
-        return score::crypto::make_unexpected(score::crypto::daemon::common::DaemonErrorCode::kInvalidArgument);
+                                   << " does not match context provider " << ctx.provider_id
+                                   << ": cross-provider persist is not supported";
+        return score::crypto::make_unexpected(score::crypto::daemon::common::DaemonErrorCode::kKeyNotExportable);
     }
 
-    auto slot_res = ResolveWritableSlot(ctx, request, handle.algorithm);
+    // A slot owned by another provider would need the key material in plain
+    // form, so it is refused like an export.
+    auto slot_res = ResolveWritableSlot(
+        ctx, slot_nid_res.value(), handle.algorithm, score::crypto::daemon::common::DaemonErrorCode::kKeyNotExportable);
     if (!slot_res.has_value())
     {
         return score::crypto::make_unexpected(slot_res.error());

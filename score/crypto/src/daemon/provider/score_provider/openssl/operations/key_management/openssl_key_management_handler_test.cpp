@@ -582,9 +582,12 @@ class KeyManagementStoreToSlotTest : public KeyManagementHandlerTest
 
     /// Register an empty AES-256/MAC slot whose deployment descriptor points at
     /// a key file that does not exist yet. Returns the slot data node id.
-    dm::DataNodeId AddEmptySlot(const std::string& name,
-                                std::vector<std::uint32_t> write_uids = {kWriterUid},
-                                std::vector<common::ProviderId> provider_ids = {kProviderId})
+    dm::DataNodeId AddEmptySlot(
+        const std::string& name,
+        std::vector<std::uint32_t> write_uids = {kWriterUid},
+        std::vector<common::ProviderId> provider_ids = {kProviderId},
+        const std::string& algorithm = "AES-256",
+        score::crypto::KeyOperationPermission allowed = score::crypto::KeyOperationPermission::kMac)
     {
         const auto descriptor = m_dir / (name + ".kv");
         std::ofstream kv{descriptor};
@@ -593,9 +596,9 @@ class KeyManagementStoreToSlotTest : public KeyManagementHandlerTest
 
         km::KeySlotConfig cfg{};
         cfg.slot_name = "store/" + name;
-        cfg.algorithm = "AES-256";
+        cfg.algorithm = algorithm;
         cfg.provider_ids = std::move(provider_ids);
-        cfg.allowed_operations = score::crypto::KeyOperationPermission::kMac;
+        cfg.allowed_operations = allowed;
         cfg.access_policy.allowed_uids = {kWriterUid};
         cfg.access_policy.allowed_write_uids = std::move(write_uids);
         cfg.deployment_path = descriptor.string();
@@ -634,12 +637,12 @@ class KeyManagementStoreToSlotTest : public KeyManagementHandlerTest
         return Exec(km::operations::KEY_IMPORT_TO_SLOT, std::move(params));
     }
 
-    score::crypto::Expected<common::ResponseParameters, common::DaemonErrorCode> GenerateToSlot(
-        dm::DataNodeId slot,
-        const std::string& algorithm)
+    score::crypto::Expected<common::ResponseParameters, common::DaemonErrorCode>
+    GenerateToSlot(dm::DataNodeId slot, const std::string& algorithm, std::uint64_t public_slot = 0U)
     {
         common::RequestParameters params;
         params.push_back(static_cast<std::uint64_t>(slot));
+        params.push_back(public_slot);
         params.push_back(std::string_view(algorithm));
         return Exec(km::operations::KEY_GENERATE_TO_SLOT, std::move(params));
     }
@@ -775,4 +778,127 @@ TEST_F(KeyManagementStoreToSlotTest, Persist_KeyNarrowerThanSlot_IsRefused)
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), common::DaemonErrorCode::kKeyOperationNotPermitted);
     EXPECT_FALSE(std::filesystem::exists(KeyPath("narrow")));
+}
+
+TEST_F(KeyManagementStoreToSlotTest, Persist_IntoSlotOfAnotherProvider_IsRefusedAsNotExportable)
+{
+    constexpr common::ProviderId kOtherPrimary = 7;
+    const auto slot = AddEmptySlot("foreign", {kWriterUid}, {kOtherPrimary, kProviderId});
+    const auto key = GenerateVolatile(score::crypto::KeyOperationPermission::kMac);
+    ASSERT_NE(key, 0U);
+
+    auto result = Persist(slot, key);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), common::DaemonErrorCode::kKeyNotExportable);
+    EXPECT_FALSE(std::filesystem::exists(KeyPath("foreign")));
+}
+
+// ---------------------------------------------------------------------------
+// Key pairs into a private-key slot and a public-key slot
+// ---------------------------------------------------------------------------
+
+class KeyManagementStoreKeyPairTest : public KeyManagementStoreToSlotTest
+{
+  protected:
+    dm::DataNodeId AddPrivateSlot(const std::string& name)
+    {
+        return AddEmptySlot(name, {kWriterUid}, {kProviderId}, kEcdsa, score::crypto::KeyOperationPermission::kSign);
+    }
+
+    dm::DataNodeId AddPublicSlot(const std::string& name, std::vector<common::ProviderId> provider_ids = {kProviderId})
+    {
+        return AddEmptySlot(
+            name, {kWriterUid}, std::move(provider_ids), kEcdsa, score::crypto::KeyOperationPermission::kVerify);
+    }
+
+    score::crypto::Expected<common::ResponseParameters, common::DaemonErrorCode> Load(dm::DataNodeId slot)
+    {
+        common::RequestParameters params;
+        params.push_back(static_cast<std::uint64_t>(slot));
+        return Exec(km::operations::KEY_LOAD, std::move(params));
+    }
+
+    const std::string kEcdsa{"ECDSA-P256-SHA256"};
+};
+
+TEST_F(KeyManagementStoreKeyPairTest, GenerateWithPublicSlot_FillsBothSlots)
+{
+    const auto priv = AddPrivateSlot("pair-private");
+    const auto pub = AddPublicSlot("pair-public");
+
+    auto result = GenerateToSlot(priv, kEcdsa, pub);
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+
+    ASSERT_TRUE(std::filesystem::exists(KeyPath("pair-private")));
+    ASSERT_TRUE(std::filesystem::exists(KeyPath("pair-public")));
+    EXPECT_NE(ReadKeyFile("pair-private"), ReadKeyFile("pair-public"));
+
+    auto priv_key = Load(priv);
+    ASSERT_TRUE(priv_key.has_value()) << static_cast<int>(priv_key.error());
+    auto pub_key = Load(pub);
+    ASSERT_TRUE(pub_key.has_value()) << static_cast<int>(pub_key.error());
+    auto pub_handle = m_service->PeekKeyHandle(kAllowedClient, std::get<std::uint64_t>(pub_key.value()[0]));
+    ASSERT_TRUE(pub_handle.has_value());
+    // A public-only key has no private-half rights; the slot's operations apply to the public half.
+    EXPECT_EQ(pub_handle.value().permissions, score::crypto::KeyOperationPermission::kNone);
+    EXPECT_EQ(pub_handle.value().public_key_permissions, score::crypto::KeyOperationPermission::kVerify);
+}
+
+TEST_F(KeyManagementStoreKeyPairTest, PublicSlotOccupied_LeavesPrivateSlotEmpty)
+{
+    const auto priv = AddPrivateSlot("busy-private");
+    const auto pub = AddPublicSlot("busy-public");
+    ASSERT_TRUE(GenerateToSlot(AddPrivateSlot("busy-first"), kEcdsa, pub).has_value());
+    const auto public_before = ReadKeyFile("busy-public");
+
+    auto result = GenerateToSlot(priv, kEcdsa, pub);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), common::DaemonErrorCode::kKeySlotOccupied);
+    EXPECT_FALSE(std::filesystem::exists(KeyPath("busy-private")));
+    EXPECT_EQ(ReadKeyFile("busy-public"), public_before);
+}
+
+TEST_F(KeyManagementStoreKeyPairTest, PublicSlotOfAnotherProvider_IsRefusedBeforeAnyWrite)
+{
+    constexpr common::ProviderId kOtherPrimary = 7;
+    const auto priv = AddPrivateSlot("mixed-private");
+    const auto pub = AddPublicSlot("mixed-public", {kOtherPrimary, kProviderId});
+
+    auto result = GenerateToSlot(priv, kEcdsa, pub);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), common::DaemonErrorCode::kAccessDenied);
+    EXPECT_FALSE(std::filesystem::exists(KeyPath("mixed-private")));
+    EXPECT_FALSE(std::filesystem::exists(KeyPath("mixed-public")));
+}
+
+TEST_F(KeyManagementStoreKeyPairTest, PublicSlotSameAsPrivateSlot_IsRefused)
+{
+    const auto priv = AddPrivateSlot("self");
+
+    auto result = GenerateToSlot(priv, kEcdsa, priv);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), common::DaemonErrorCode::kInvalidArgument);
+    EXPECT_FALSE(std::filesystem::exists(KeyPath("self")));
+}
+
+TEST_F(KeyManagementStoreKeyPairTest, AsymmetricWithoutPublicSlot_StoresOnlyPrivateSlot)
+{
+    const auto priv = AddPrivateSlot("alone");
+
+    auto result = GenerateToSlot(priv, kEcdsa);
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_TRUE(Load(priv).has_value());
+}
+
+TEST_F(KeyManagementStoreKeyPairTest, SymmetricAlgorithm_IgnoresPublicSlot)
+{
+    const auto slot = AddEmptySlot("sym");
+    const auto pub = AddPublicSlot("sym-public");
+
+    // Even an unresolvable id is ignored for a symmetric algorithm.
+    ASSERT_TRUE(GenerateToSlot(slot, "AES-256", 0xDEADBEEFU).has_value());
+    ASSERT_TRUE(GenerateToSlot(AddEmptySlot("sym2"), "AES-256", pub).has_value());
+
+    EXPECT_EQ(ReadKeyFile("sym").size(), 32U);
+    EXPECT_FALSE(std::filesystem::exists(KeyPath("sym-public")));
 }

@@ -103,29 +103,40 @@ score::crypto::Expected<IKeyHandler::Sptr, Error> FileBackedSlotHandler::LoadKey
     return import_result;
 }
 
-score::crypto::Expected<std::monostate, Error> FileBackedSlotHandler::StoreKey(const KeySlotConfig& slot,
-                                                                               IKeyHandler& handler)
+score::crypto::Expected<std::string, Error> FileBackedSlotHandler::ResolveEmptyKeyPath(const KeySlotConfig& slot)
 {
     auto deploy_result = DeploymentLoader::Load(slot.deployment_path, slot.deployment_format);
     if (!deploy_result.has_value())
         return score::crypto::make_unexpected(deploy_result.error());
 
-    const auto& deploy_info = deploy_result.value();
-    const auto path_it = deploy_info.key_properties.find(std::string{deployment_keys::kKeyPath});
-    if (path_it == deploy_info.key_properties.end() || path_it->second.empty())
+    const auto& key_props = deploy_result.value().key_properties;
+    const auto path_it = key_props.find(std::string{deployment_keys::kKeyPath});
+    if (path_it == key_props.end() || path_it->second.empty())
         return score::crypto::make_unexpected(Error::kInvalidArgument);
-    const auto& key_path = path_it->second;
 
-    const auto exists = file_io::FileExists(key_path);
+    // Keys are stored in their native encoding: raw for symmetric keys, DER for
+    // asymmetric ones. A slot that names another format could not load them.
+    const auto algorithm = ::score::crypto::GetAlgorithmDescriptor(slot.algorithm);
+    if (!algorithm.has_value())
+        return score::crypto::make_unexpected(Error::kUnsupportedAlgorithm);
+    const bool symmetric = (algorithm->key_type == ::score::crypto::KeyType::kSecret) ||
+                           (algorithm->key_type == ::score::crypto::KeyType::kAes);
+    const auto format_it = key_props.find(std::string{deployment_keys::kKeyFormat});
+    if ((format_it != key_props.end()) && (format_it->second != (symmetric ? "raw" : "der")))
+        return score::crypto::make_unexpected(Error::kInvalidFormat);
+
+    const auto exists = file_io::FileExists(path_it->second);
     if (!exists.has_value())
         return score::crypto::make_unexpected(exists.error());
     if (exists.value())
         return score::crypto::make_unexpected(Error::kKeySlotOccupied);
+    return path_it->second;
+}
 
-    auto serialised = handler.SerializeForStorage();
-    if (!serialised.has_value())
-        return score::crypto::make_unexpected(serialised.error());
-    auto& bytes = serialised.value().bytes;
+score::crypto::Expected<std::monostate, Error> FileBackedSlotHandler::WriteKeyFile(const std::string& key_path,
+                                                                                   SecureKeyBytes& material)
+{
+    auto& bytes = material.bytes;
     if (bytes.empty() || bytes.size() > kMaxKeyFileSize)
     {
         common::SecureZeroizeAndClear(bytes);
@@ -142,6 +153,56 @@ score::crypto::Expected<std::monostate, Error> FileBackedSlotHandler::StoreKey(c
                                                                                            : write_result.error());
     }
     return std::monostate{};
+}
+
+score::crypto::Expected<std::monostate, Error> FileBackedSlotHandler::StoreKey(const KeySlotConfig& slot,
+                                                                               IKeyHandler& handler)
+{
+    auto key_path = ResolveEmptyKeyPath(slot);
+    if (!key_path.has_value())
+        return score::crypto::make_unexpected(key_path.error());
+
+    auto serialised = handler.SerializeForStorage();
+    if (!serialised.has_value())
+        return score::crypto::make_unexpected(serialised.error());
+    return WriteKeyFile(key_path.value(), serialised.value());
+}
+
+score::crypto::Expected<std::monostate, Error> FileBackedSlotHandler::StoreKeyPair(const KeySlotConfig& private_slot,
+                                                                                   const KeySlotConfig& public_slot,
+                                                                                   IKeyHandler& handler)
+{
+    auto private_path = ResolveEmptyKeyPath(private_slot);
+    if (!private_path.has_value())
+        return score::crypto::make_unexpected(private_path.error());
+    auto public_path = ResolveEmptyKeyPath(public_slot);
+    if (!public_path.has_value())
+        return score::crypto::make_unexpected(public_path.error());
+    if (private_path.value() == public_path.value())
+        return score::crypto::make_unexpected(Error::kInvalidArgument);
+
+    auto private_key = handler.SerializeForStorage();
+    if (!private_key.has_value())
+        return score::crypto::make_unexpected(private_key.error());
+    auto public_key = handler.SerializePublicKeyForStorage();
+    if (!public_key.has_value())
+    {
+        common::SecureZeroizeAndClear(private_key.value().bytes);
+        return score::crypto::make_unexpected(public_key.error());
+    }
+
+    // The public key goes first: undoing it if the private store fails leaves
+    // no secret behind.
+    auto public_result = WriteKeyFile(public_path.value(), public_key.value());
+    if (!public_result.has_value())
+    {
+        common::SecureZeroizeAndClear(private_key.value().bytes);
+        return public_result;
+    }
+    auto private_result = WriteKeyFile(private_path.value(), private_key.value());
+    if (!private_result.has_value())
+        static_cast<void>(file_io::RemoveFile(public_path.value()));
+    return private_result;
 }
 
 score::crypto::Expected<score::crypto::KeySlotState, Error> FileBackedSlotHandler::GetSlotState(

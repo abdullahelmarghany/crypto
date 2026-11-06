@@ -18,6 +18,7 @@
 #include "score/crypto/src/daemon/key_management/core/key_entry.hpp"
 #include "score/crypto/src/daemon/key_management/nodes/key_data_node.hpp"
 #include "score/crypto/src/daemon/key_management/nodes/key_slot_data_node.hpp"
+#include "score/crypto/src/daemon/key_management/slot/access_policy_enforcer.hpp"
 
 #include "score/mw/log/logging.h"
 
@@ -286,6 +287,40 @@ Expected<SlotResolution, score::crypto::daemon::common::DaemonErrorCode> KeyMana
     }
 
     return SlotResolution{slot_cfg_res.value(), slot_handle};
+}
+
+// ---------------------------------------------------------------------------
+// ClearSlot
+// ---------------------------------------------------------------------------
+
+Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode> KeyManagementService::ClearSlot(
+    data_manager::ClientId client_id,
+    const common::ProviderId& provider_id,
+    const SlotResolution& slot,
+    IKeySlotHandler& slot_handler)
+{
+    auto write_res = AccessPolicyEnforcer::CheckWritePermission(*slot.config, client_id);
+    if (!write_res.has_value())
+    {
+        score::mw::log::LogError() << LOG_PREFIX << "ClearSlot: client has no write access to slot";
+        return score::crypto::make_unexpected(write_res.error());
+    }
+    auto provider_res = AccessPolicyEnforcer::CheckProviderAccess(*slot.config, provider_id, true);
+    if (!provider_res.has_value())
+    {
+        score::mw::log::LogError() << LOG_PREFIX << "ClearSlot: provider is not the primary provider of the slot";
+        return score::crypto::make_unexpected(provider_res.error());
+    }
+
+    auto clear_res = slot_handler.ClearSlot(*slot.config);
+    if (!clear_res.has_value())
+    {
+        score::mw::log::LogError() << LOG_PREFIX << "ClearSlot: slot handler failed";
+        return score::crypto::make_unexpected(clear_res.error());
+    }
+
+    GetProviderRegistry(provider_id).DetachSlot(slot.handle);
+    return std::monostate{};
 }
 
 // ---------------------------------------------------------------------------

@@ -225,6 +225,18 @@ class KeyManagementService final
         data_manager::ClientId client_id,
         data_manager::DataNodeId slot_node_id);
 
+    /// Clear the key material stored in a slot.
+    ///
+    /// Requires write access: the client UID must be in allowed_write_uids and
+    /// @p provider_id must be the slot's primary provider. On success the slot
+    /// is detached from the provider registry so a later load does not share a
+    /// key loaded before the clear. Keys already handed out stay usable.
+    [[nodiscard]] Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode> ClearSlot(
+        data_manager::ClientId client_id,
+        const common::ProviderId& provider_id,
+        const SlotResolution& slot,
+        IKeySlotHandler& slot_handler);
+
     /// Resolve a key DataNode ID (a KeyDataNode) back to its backing KeyEntry.
     ///
     /// Used by executor handlers that need a ProviderKeyHandle or the raw

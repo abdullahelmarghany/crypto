@@ -65,6 +65,12 @@ class Pkcs11KeySlotHandler final : public key_management::IKeySlotHandler
     [[nodiscard]] score::crypto::Expected<score::crypto::KeySlotState, score::crypto::daemon::common::DaemonErrorCode>
     GetSlotState(const key_management::KeySlotConfig& slot) override;
 
+    /// Destroy every token object matching the slot's label / object ID / class.
+    ///
+    /// Clearing an empty slot succeeds.
+    [[nodiscard]] score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode> ClearSlot(
+        const key_management::KeySlotConfig& slot) override;
+
     /// Return slot metadata from config and token object attributes.
     [[nodiscard]] score::crypto::Expected<score::crypto::KeySlotInfo, score::crypto::daemon::common::DaemonErrorCode>
     GetSlotInfo(const key_management::KeySlotConfig& slot) override;

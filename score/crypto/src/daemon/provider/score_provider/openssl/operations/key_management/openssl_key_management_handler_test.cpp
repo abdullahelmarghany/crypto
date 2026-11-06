@@ -37,8 +37,13 @@
 #include "score/crypto/src/daemon/provider/score_provider/openssl/key_management/openssl_key_factory.hpp"
 
 #include <gtest/gtest.h>
+#include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace km = score::crypto::daemon::key_management;
 namespace dm = score::crypto::daemon::data_manager;
@@ -432,4 +437,123 @@ TEST_F(KeyManagementHandlerTest, MultipleEphemeralKeys_IndependentLifecycle)
     auto r1 = m_handler->Execute(
         {score::crypto::daemon::common::actors::OP_ACTOR_KEY_MANAGEMENT, km::operations::KEY_RELEASE}, rel1_params);
     EXPECT_TRUE(r1.has_value());
+}
+
+// ============================================================================
+// ClearKey tests (via Execute with KEY_CLEAR)
+// ============================================================================
+
+class KeyClearTest : public KeyManagementHandlerTest
+{
+  protected:
+    void SetUp() override
+    {
+        KeyManagementHandlerTest::SetUp();
+        m_dir =
+            std::filesystem::temp_directory_path() /
+            ("score_crypto_key_clear_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(m_dir);
+        m_key_path = m_dir / "slot.key";
+        {
+            std::ofstream key{m_key_path, std::ios::binary};
+            key << std::string(32U, 'K');
+        }
+        std::ofstream kv{m_dir / "slot.kv"};
+        kv << "[metadata]\navailability=active\n[key]\nkey_path=" << m_key_path.string() << "\nkey_format=raw\n";
+    }
+
+    void TearDown() override
+    {
+        std::filesystem::remove_all(m_dir);
+    }
+
+    /// Register a slot backed by the temp key file and return its slot node for kAllowedClient.
+    dm::DataNodeId RegisterClearableSlot(const std::string& name,
+                                         std::vector<std::uint32_t> write_uids,
+                                         std::vector<common::ProviderId> provider_ids)
+    {
+        km::KeySlotConfig cfg{};
+        cfg.slot_name = name;
+        cfg.algorithm = "AES-256";
+        cfg.provider_ids = std::move(provider_ids);
+        cfg.allowed_operations = score::crypto::KeyOperationPermission::kMac;
+        cfg.access_policy.allowed_uids = {1000U};
+        cfg.access_policy.allowed_write_uids = std::move(write_uids);
+        cfg.deployment_path = (m_dir / "slot.kv").string();
+        cfg.deployment_format = "kv";
+        static_cast<void>(m_slot_registry->RegisterSlot(cfg));
+        return ResolveSlotToDataNode(name, kAllowedClient);
+    }
+
+    score::crypto::Expected<common::ResponseParameters, common::DaemonErrorCode> Run(std::uint16_t op,
+                                                                                     dm::DataNodeId slot_node)
+    {
+        common::RequestParameters params;
+        SetStandardParams(params);
+        params.push_back(static_cast<std::uint64_t>(slot_node));
+        return m_handler->Execute({score::crypto::daemon::common::actors::OP_ACTOR_KEY_MANAGEMENT, op}, params);
+    }
+
+    std::filesystem::path m_dir;
+    std::filesystem::path m_key_path;
+};
+
+TEST_F(KeyClearTest, ClearKey_WriteAllowed_ErasesKeyAndSlotBecomesEmpty)
+{
+    const auto slot_node = RegisterClearableSlot("test/clearable", {1000U}, {kProviderId});
+    ASSERT_NE(slot_node, 0U);
+    ASSERT_TRUE(Run(km::operations::KEY_LOAD, slot_node).has_value());
+
+    auto clear = Run(km::operations::KEY_CLEAR, slot_node);
+
+    ASSERT_TRUE(clear.has_value());
+    EXPECT_FALSE(std::filesystem::exists(m_key_path));
+    auto info = Run(km::operations::KEY_SLOT_INFO, slot_node);
+    ASSERT_TRUE(info.has_value());
+    EXPECT_EQ(std::get<std::uint64_t>(info.value()[0]),
+              static_cast<std::uint64_t>(score::crypto::KeySlotState::kEmpty));
+    // The key loaded before the clear must not be shared to a new load.
+    EXPECT_FALSE(Run(km::operations::KEY_LOAD, slot_node).has_value());
+}
+
+TEST_F(KeyClearTest, ClearKey_EmptySlot_Succeeds)
+{
+    const auto slot_node = RegisterClearableSlot("test/clearable", {1000U}, {kProviderId});
+    ASSERT_NE(slot_node, 0U);
+
+    ASSERT_TRUE(Run(km::operations::KEY_CLEAR, slot_node).has_value());
+    EXPECT_TRUE(Run(km::operations::KEY_CLEAR, slot_node).has_value());
+}
+
+TEST_F(KeyClearTest, ClearKey_UidWithoutWriteAccess_IsDenied)
+{
+    const auto slot_node = RegisterClearableSlot("test/clearable", {0U}, {kProviderId});
+    ASSERT_NE(slot_node, 0U);
+
+    auto clear = Run(km::operations::KEY_CLEAR, slot_node);
+
+    ASSERT_FALSE(clear.has_value());
+    EXPECT_EQ(clear.error(), common::DaemonErrorCode::kAccessDenied);
+    EXPECT_TRUE(std::filesystem::exists(m_key_path));
+}
+
+TEST_F(KeyClearTest, ClearKey_NonPrimaryProvider_IsDenied)
+{
+    constexpr common::ProviderId kOtherProvider = 5U;
+    const auto slot_node = RegisterClearableSlot("test/clearable", {1000U}, {kOtherProvider, kProviderId});
+    ASSERT_NE(slot_node, 0U);
+
+    auto clear = Run(km::operations::KEY_CLEAR, slot_node);
+
+    ASSERT_FALSE(clear.has_value());
+    EXPECT_EQ(clear.error(), common::DaemonErrorCode::kAccessDenied);
+    EXPECT_TRUE(std::filesystem::exists(m_key_path));
+}
+
+TEST_F(KeyClearTest, ClearKey_InvalidSlotNode_ReturnsInvalidArgument)
+{
+    auto clear = Run(km::operations::KEY_CLEAR, m_parent_id);
+
+    ASSERT_FALSE(clear.has_value());
+    EXPECT_EQ(clear.error(), common::DaemonErrorCode::kInvalidArgument);
 }

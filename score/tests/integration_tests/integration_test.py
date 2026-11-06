@@ -256,6 +256,20 @@ class TestCryptoDaemon:
             },
         )
 
+    def test_score_api_key_clear(
+        self, target: Target, target_os: str, install_dir: str, openssl_backend: None
+    ):
+        """Test SCORE ClearKey erasing a dedicated file-backed key slot."""
+        run_test_app(
+            target,
+            target_os,
+            Path(f"{install_dir}/bin/score_api_key_clear_test"),
+            env={
+                "LD_LIBRARY_PATH": f"{install_dir}/lib",
+                "TEST_VECTORS_DIR": f"{install_dir}/share/test_vectors",
+            },
+        )
+
     def test_hash_performance_test(self, target: Target, target_os: str, install_dir: str):
         """Test concurrent and sequential hash operations."""
         run_test_app(

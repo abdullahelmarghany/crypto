@@ -133,29 +133,42 @@ struct Pkcs11AlgoInfo
     return CK_UNAVAILABLE_INFORMATION;
 }
 
-/// @brief Decode a hex string (e.g. "0102abcd") into a byte vector.
+/// @brief Strictly decode a hex string (e.g. "0102abcd") into bytes.
 ///
-/// Returns an empty vector if the input is empty or has odd length.
-inline std::vector<uint8_t> HexDecode(std::string_view hex) noexcept
+/// Returns std::nullopt if the input is empty, has odd length or contains a
+/// character outside 0-9, a-f, A-F.
+inline std::optional<std::vector<uint8_t>> TryHexDecode(std::string_view hex)
 {
     if (hex.empty() || (hex.size() % 2U != 0U))
     {
-        return {};
+        return std::nullopt;
     }
+    const auto nibble = [](char c) -> std::optional<uint8_t> {
+        if (c >= '0' && c <= '9')
+        {
+            return static_cast<uint8_t>(c - '0');
+        }
+        if (c >= 'a' && c <= 'f')
+        {
+            return static_cast<uint8_t>(c - 'a' + 10);
+        }
+        if (c >= 'A' && c <= 'F')
+        {
+            return static_cast<uint8_t>(c - 'A' + 10);
+        }
+        return std::nullopt;
+    };
     std::vector<uint8_t> out;
     out.reserve(hex.size() / 2U);
     for (std::size_t i = 0U; i < hex.size(); i += 2U)
     {
-        const auto nibble = [](char c) -> uint8_t {
-            if (c >= '0' && c <= '9')
-                return static_cast<uint8_t>(c - '0');
-            if (c >= 'a' && c <= 'f')
-                return static_cast<uint8_t>(c - 'a' + 10);
-            if (c >= 'A' && c <= 'F')
-                return static_cast<uint8_t>(c - 'A' + 10);
-            return 0U;
-        };
-        out.push_back(static_cast<uint8_t>((nibble(hex[i]) << 4U) | nibble(hex[i + 1U])));
+        const auto high = nibble(hex[i]);
+        const auto low = nibble(hex[i + 1U]);
+        if (!high.has_value() || !low.has_value())
+        {
+            return std::nullopt;
+        }
+        out.push_back(static_cast<uint8_t>((*high << 4U) | *low));
     }
     return out;
 }

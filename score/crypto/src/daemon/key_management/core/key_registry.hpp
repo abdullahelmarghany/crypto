@@ -106,6 +106,12 @@ class KeyRegistry final
     /// @return true if the key was found and removed, false otherwise.
     bool Unregister(KeyRegistryId id);
 
+    /// Drop the slot → key mapping so the next load reads the slot again.
+    ///
+    /// The KeyEntry itself stays registered: existing KeyDataNodes keep
+    /// working and are released through Unregister()/CleanupClient() as usual.
+    void DetachSlot(SlotHandle slot_handle);
+
     // ------------------------------------------------------------------
     // Crash cleanup
     // ------------------------------------------------------------------

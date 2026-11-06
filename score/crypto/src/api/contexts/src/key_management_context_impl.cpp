@@ -601,11 +601,45 @@ score::Result<std::size_t> KeyManagementContextImpl::GetExportKeySize(const Cryp
     return static_cast<std::size_t>(size_result.value());
 }
 
-score::Result<std::monostate> KeyManagementContextImpl::ClearKey(const CryptoResourceId& /*key*/)
+score::Result<std::monostate> KeyManagementContextImpl::ClearKey(const CryptoResourceId& key)
 {
-    score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR: ClearKey not yet implemented";
-    return score::Result<std::monostate>{
-        score::unexpect, MakeError(CryptoErrorCode::kUnsupportedOperation, "ClearKey not yet implemented")};
+    if (key.type != ResourceType::kKeySlot)
+    {
+        score::mw::log::LogError()
+            << "[API][KeyMgmtContextImpl] ERROR: ClearKey called with invalid slot resource type";
+        return score::Result<std::monostate>{
+            score::unexpect,
+            MakeError(CryptoErrorCode::kInvalidArgument, "ClearKey called with invalid slot resource type")};
+    }
+
+    auto control_req_result = proto::ControlRequestBuilder()
+                                  .forDataNodeId(m_context_id)
+                                  .operation({actors::OP_ACTOR_KEY_MANAGEMENT, keymgmt_ops::KEY_CLEAR})
+                                  .with_in_val_uint64(key.id)
+                                  .build();
+
+    if (!control_req_result.has_value())
+    {
+        score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR: Failed to build KEY_CLEAR request";
+        return score::Result<std::monostate>{
+            score::unexpect, MakeError(CryptoErrorCode::kOperationFailed, "Failed to build KEY_CLEAR request")};
+    }
+
+    auto control_response_res = m_connection->SendRequest(control_req_result.value());
+
+    auto validator = proto::ControlResponseValidator::FromResult(control_response_res);
+    validator.expectOperation({actors::OP_ACTOR_KEY_MANAGEMENT, keymgmt_ops::KEY_CLEAR}).expectSuccess();
+
+    if (!validator.isValid())
+    {
+        score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR:" << validator.getError();
+        return score::Result<std::monostate>{
+            score::unexpect,
+            MakeError(validator.getOperationError().value_or(CryptoErrorCode::kOperationFailed),
+                      "KEY_CLEAR daemon response invalid")};
+    }
+
+    return std::monostate{};
 }
 
 score::Result<KeySlotInfo> KeyManagementContextImpl::GetKeySlotInfo(const CryptoResourceId& /*slot*/)

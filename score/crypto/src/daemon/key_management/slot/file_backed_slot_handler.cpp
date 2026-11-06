@@ -95,6 +95,27 @@ score::crypto::Expected<score::crypto::KeySlotState, Error> FileBackedSlotHandle
     return exists.value() ? score::crypto::KeySlotState::kOccupied : score::crypto::KeySlotState::kEmpty;
 }
 
+score::crypto::Expected<std::monostate, Error> FileBackedSlotHandler::ClearSlot(const KeySlotConfig& slot)
+{
+    auto deploy_result = DeploymentLoader::Load(slot.deployment_path, slot.deployment_format);
+    if (!deploy_result.has_value())
+    {
+        if (deploy_result.error() == Error::kResourceNotAllocated)
+            return std::monostate{};
+        return score::crypto::make_unexpected(deploy_result.error());
+    }
+
+    const auto& deploy_info = deploy_result.value();
+    const auto path_it = deploy_info.key_properties.find(std::string{deployment_keys::kKeyPath});
+    if (path_it == deploy_info.key_properties.end() || path_it->second.empty())
+        return std::monostate{};
+
+    auto erase_result = file_io::SecureEraseFile(path_it->second, kMaxKeyFileSize);
+    if (!erase_result.has_value() && erase_result.error() != Error::kResourceNotAllocated)
+        return score::crypto::make_unexpected(erase_result.error());
+    return std::monostate{};
+}
+
 score::crypto::Expected<score::crypto::KeySlotInfo, Error> FileBackedSlotHandler::GetSlotInfo(const KeySlotConfig& slot)
 {
     auto state_result = GetSlotState(slot);

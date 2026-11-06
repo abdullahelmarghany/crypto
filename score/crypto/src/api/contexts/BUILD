@@ -131,3 +131,16 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "key_management_context_impl_test",
+    srcs = ["src/key_management_context_impl_test.cpp"],
+    deps = [
+        ":crypto_contexts_impl",
+        "//score/crypto/src/api/common:crypto_common",
+        "//score/crypto/src/api/control_plane",
+        "//score/crypto/src/daemon/common",
+        "//score/crypto/src/daemon/key_management:key_management_operations",
+        "@googletest//:gtest_main",
+    ],
+)

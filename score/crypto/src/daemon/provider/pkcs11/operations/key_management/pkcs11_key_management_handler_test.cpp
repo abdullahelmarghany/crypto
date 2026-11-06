@@ -315,6 +315,240 @@ TEST_F(Pkcs11KeyHandlerTest, LoadKey_ExtractableKey_ReturnsNativeHandle)
     EXPECT_NE(std::get<std::uint64_t>(result.value()[0]), 0U);
 }
 
+// ===========================================================================
+// ClearKey — destroys the slot's token object(s)
+// ===========================================================================
+
+class Pkcs11KeyClearTest : public Pkcs11KeyHandlerTest
+{
+  protected:
+    dm::DataNodeId RegisterClearableSlot(const std::string& label, std::vector<common::ProviderId> provider_ids)
+    {
+        return RegisterSlotWithKeyLines(
+            label, std::string{km::deployment_keys::kPkcs11Label} + "=" + label + "\n", std::move(provider_ids));
+    }
+
+    dm::DataNodeId RegisterSlotWithKeyLines(const std::string& name,
+                                            const std::string& key_lines,
+                                            std::vector<common::ProviderId> provider_ids)
+    {
+        km::KeySlotConfig slot{};
+        slot.slot_name = "test/clearable_" + name;
+        slot.algorithm = "HMAC-SHA256";
+        slot.provider_names = {"SOFTHSM_TEST"};
+        slot.provider_ids = std::move(provider_ids);
+        slot.allowed_operations = score::crypto::KeyOperationPermission::kMac;
+        slot.access_policy.allowed_write_uids.push_back(static_cast<uint32_t>(kClient >> 32U));
+        m_deploy_path = std::filesystem::temp_directory_path().string() + "/test_pkcs11_clear_" + name + ".kv";
+        m_all_deploy_paths.push_back(m_deploy_path);
+        {
+            std::ofstream f(m_deploy_path);
+            f << "[metadata]\navailability=active\n[key]\n" << key_lines;
+        }
+        slot.deployment_path = m_deploy_path;
+        slot.deployment_format = "kv";
+        return RegisterSlotNode(slot);
+    }
+
+    void TearDown() override
+    {
+        for (const auto& path : m_all_deploy_paths)
+        {
+            std::filesystem::remove(path);
+        }
+        Pkcs11KeyHandlerTest::TearDown();
+    }
+
+    score::crypto::Expected<common::ResponseParameters, common::DaemonErrorCode> Run(std::uint16_t op,
+                                                                                     dm::DataNodeId slot_node)
+    {
+        common::RequestParameters params;
+        SetStandardParams(params);
+        params.push_back(static_cast<std::uint64_t>(slot_node));
+        return m_km_handler->Execute({score::crypto::daemon::common::actors::OP_ACTOR_KEY_MANAGEMENT, op}, params);
+    }
+
+    std::uint64_t SlotState(dm::DataNodeId slot_node)
+    {
+        auto info = Run(km::operations::KEY_SLOT_INFO, slot_node);
+        return info.has_value() ? std::get<std::uint64_t>(info.value()[0]) : ~0ULL;
+    }
+
+    dm::DataNodeId RegisterLabelAndIdSlot(const std::string& name, const std::string& label, const std::string& id)
+    {
+        return RegisterSlotWithKeyLines(name,
+                                        std::string{km::deployment_keys::kPkcs11Label} + "=" + label + "\n" +
+                                            std::string{km::deployment_keys::kPkcs11ObjectId} + "=" + id + "\n",
+                                        {1});
+    }
+
+    /// Number of token objects labelled @p label, read straight from the token.
+    CK_ULONG CountObjectsWithLabel(const std::string& label)
+    {
+        std::vector<CK_UTF8CHAR> value(label.begin(), label.end());
+        CK_ATTRIBUTE tmpl{CKA_LABEL, value.data(), static_cast<CK_ULONG>(value.size())};
+        if (function_list->C_FindObjectsInit(session, &tmpl, 1U) != CKR_OK)
+        {
+            return 0U;
+        }
+        CK_ULONG total = 0U;
+        CK_OBJECT_HANDLE found[8]{};
+        CK_ULONG count = 0U;
+        while ((function_list->C_FindObjects(session, found, 8U, &count) == CKR_OK) && (count > 0U))
+        {
+            total += count;
+        }
+        function_list->C_FindObjectsFinal(session);
+        return total;
+    }
+
+    bool SetObjectId(CK_OBJECT_HANDLE object, std::vector<uint8_t> id)
+    {
+        CK_ATTRIBUTE attr{CKA_ID, id.data(), static_cast<CK_ULONG>(id.size())};
+        return function_list->C_SetAttributeValue(session, object, &attr, 1U) == CKR_OK;
+    }
+
+    std::string m_deploy_path;
+    std::vector<std::string> m_all_deploy_paths;
+};
+
+TEST_F(Pkcs11KeyClearTest, ClearKey_TokenKey_IsDestroyedAndSlotBecomesEmpty)
+{
+    const std::string label = "test_hmac_clear";
+    // Two objects with the same label: both belong to the slot and must go.
+    ASSERT_NE(CreateTokenKey(std::vector<uint8_t>(32, 0xA1), label, CKK_GENERIC_SECRET, false),
+              static_cast<CK_OBJECT_HANDLE>(CK_INVALID_HANDLE));
+    ASSERT_NE(CreateTokenKey(std::vector<uint8_t>(32, 0xA2), label, CKK_GENERIC_SECRET, false),
+              static_cast<CK_OBJECT_HANDLE>(CK_INVALID_HANDLE));
+    const auto slot_node = RegisterClearableSlot(label, {1});
+    ASSERT_NE(slot_node, 0U);
+    ASSERT_TRUE(Run(km::operations::KEY_LOAD, slot_node).has_value());
+
+    auto clear = Run(km::operations::KEY_CLEAR, slot_node);
+
+    ASSERT_TRUE(clear.has_value()) << "KEY_CLEAR failed: " << static_cast<int>(clear.error());
+    EXPECT_EQ(SlotState(slot_node), static_cast<std::uint64_t>(score::crypto::KeySlotState::kEmpty));
+    EXPECT_FALSE(Run(km::operations::KEY_LOAD, slot_node).has_value());
+    // Clearing an empty slot succeeds.
+    EXPECT_TRUE(Run(km::operations::KEY_CLEAR, slot_node).has_value());
+}
+
+TEST_F(Pkcs11KeyClearTest, ClearKey_OtherSlotKeysAreKept)
+{
+    ASSERT_NE(CreateTokenKey(std::vector<uint8_t>(32, 0xB1), "test_hmac_keep", CKK_GENERIC_SECRET, false),
+              static_cast<CK_OBJECT_HANDLE>(CK_INVALID_HANDLE));
+    ASSERT_NE(CreateTokenKey(std::vector<uint8_t>(32, 0xB2), "test_hmac_drop", CKK_GENERIC_SECRET, false),
+              static_cast<CK_OBJECT_HANDLE>(CK_INVALID_HANDLE));
+    const auto keep_node = RegisterClearableSlot("test_hmac_keep", {1});
+    const auto keep_deploy_path = m_deploy_path;
+    const auto drop_node = RegisterClearableSlot("test_hmac_drop", {1});
+    ASSERT_NE(keep_node, 0U);
+    ASSERT_NE(drop_node, 0U);
+
+    ASSERT_TRUE(Run(km::operations::KEY_CLEAR, drop_node).has_value());
+
+    EXPECT_EQ(SlotState(drop_node), static_cast<std::uint64_t>(score::crypto::KeySlotState::kEmpty));
+    EXPECT_EQ(SlotState(keep_node), static_cast<std::uint64_t>(score::crypto::KeySlotState::kOccupied));
+    std::filesystem::remove(keep_deploy_path);
+}
+
+TEST_F(Pkcs11KeyClearTest, ClearKey_NonPrimaryProvider_IsDenied)
+{
+    const std::string label = "test_hmac_clear_denied";
+    ASSERT_NE(CreateTokenKey(std::vector<uint8_t>(32, 0xC1), label, CKK_GENERIC_SECRET, false),
+              static_cast<CK_OBJECT_HANDLE>(CK_INVALID_HANDLE));
+    const auto slot_node = RegisterClearableSlot(label, {7, 1});
+    ASSERT_NE(slot_node, 0U);
+
+    auto clear = Run(km::operations::KEY_CLEAR, slot_node);
+
+    ASSERT_FALSE(clear.has_value());
+    EXPECT_EQ(clear.error(), common::DaemonErrorCode::kAccessDenied);
+    // The slot's primary provider (7) is not registered here, so KEY_SLOT_INFO cannot
+    // reach the slot; check the token directly that the key survived.
+    EXPECT_EQ(CountObjectsWithLabel(label), 1U);
+}
+
+TEST_F(Pkcs11KeyClearTest, EmptyLabelAndId_LoadAndClearAreRejected)
+{
+    // A class-only template would match every secret key on the token.
+    const auto bystander =
+        CreateTokenKey(std::vector<uint8_t>(32, 0xD1), "test_hmac_bystander", CKK_GENERIC_SECRET, false);
+    ASSERT_NE(bystander, static_cast<CK_OBJECT_HANDLE>(CK_INVALID_HANDLE));
+    const auto keep_node = RegisterClearableSlot("test_hmac_bystander", {1});
+    const auto keep_deploy_path = m_deploy_path;
+    ASSERT_NE(keep_node, 0U);
+    const auto slot_node = RegisterSlotWithKeyLines("empty_label_id",
+                                                    std::string{km::deployment_keys::kPkcs11Label} + "=\n" +
+                                                        std::string{km::deployment_keys::kPkcs11ObjectId} + "=\n",
+                                                    {1});
+    ASSERT_NE(slot_node, 0U);
+
+    auto load = Run(km::operations::KEY_LOAD, slot_node);
+    auto clear = Run(km::operations::KEY_CLEAR, slot_node);
+
+    // HandleLoad reports every slot load failure as kAlgorithmExecutionFailed.
+    EXPECT_FALSE(load.has_value());
+    ASSERT_FALSE(clear.has_value());
+    EXPECT_EQ(clear.error(), common::DaemonErrorCode::kInvalidArgument);
+    EXPECT_EQ(SlotState(keep_node), static_cast<std::uint64_t>(score::crypto::KeySlotState::kOccupied));
+    std::filesystem::remove(keep_deploy_path);
+}
+
+TEST_F(Pkcs11KeyClearTest, LabelWithMalformedId_IsRejectedAndLabelledKeyKept)
+{
+    // A malformed ID must not degrade to a label-only match.
+    const std::string label = "test_hmac_malformed_id";
+    ASSERT_NE(CreateTokenKey(std::vector<uint8_t>(32, 0xE1), label, CKK_GENERIC_SECRET, false),
+              static_cast<CK_OBJECT_HANDLE>(CK_INVALID_HANDLE));
+    const auto label_only_node = RegisterClearableSlot(label, {1});
+    ASSERT_NE(label_only_node, 0U);
+
+    for (const std::string id : {"abc", "zz", "0x01"})
+    {
+        const auto slot_node =
+            RegisterLabelAndIdSlot("malformed_" + std::to_string(m_all_deploy_paths.size()), label, id);
+        ASSERT_NE(slot_node, 0U);
+
+        auto clear = Run(km::operations::KEY_CLEAR, slot_node);
+        ASSERT_FALSE(clear.has_value()) << "id=" << id;
+        EXPECT_EQ(clear.error(), common::DaemonErrorCode::kInvalidArgument) << "id=" << id;
+        EXPECT_FALSE(Run(km::operations::KEY_SLOT_INFO, slot_node).has_value()) << "id=" << id;
+        EXPECT_FALSE(Run(km::operations::KEY_LOAD, slot_node).has_value()) << "id=" << id;
+    }
+
+    EXPECT_EQ(SlotState(label_only_node), static_cast<std::uint64_t>(score::crypto::KeySlotState::kOccupied));
+    // An empty object_id counts as absent, so label-only lookup is intended here.
+    const auto empty_id_node = RegisterLabelAndIdSlot("empty_id", label, "");
+    ASSERT_NE(empty_id_node, 0U);
+    EXPECT_EQ(SlotState(empty_id_node), static_cast<std::uint64_t>(score::crypto::KeySlotState::kOccupied));
+}
+
+TEST_F(Pkcs11KeyClearTest, MixedCaseHexId_MatchesOnlyTheObjectWithThatId)
+{
+    const std::string label = "test_hmac_with_id";
+    const auto object = CreateTokenKey(std::vector<uint8_t>(32, 0xF1), label, CKK_GENERIC_SECRET, false);
+    ASSERT_NE(object, static_cast<CK_OBJECT_HANDLE>(CK_INVALID_HANDLE));
+    ASSERT_TRUE(SetObjectId(object, {0xABU, 0x01U, 0xCDU}));
+    const auto other_id_node = RegisterLabelAndIdSlot("other_id", label, "ab01ce");
+    const auto upper_node = RegisterLabelAndIdSlot("upper_id", label, "AB01CD");
+    const auto mixed_node = RegisterLabelAndIdSlot("mixed_id", label, "aB01cD");
+    ASSERT_NE(other_id_node, 0U);
+    ASSERT_NE(upper_node, 0U);
+    ASSERT_NE(mixed_node, 0U);
+
+    EXPECT_EQ(SlotState(other_id_node), static_cast<std::uint64_t>(score::crypto::KeySlotState::kEmpty));
+    EXPECT_EQ(SlotState(upper_node), static_cast<std::uint64_t>(score::crypto::KeySlotState::kOccupied));
+    EXPECT_TRUE(Run(km::operations::KEY_LOAD, mixed_node).has_value());
+
+    // Clearing the slot with a different ID leaves the object alone.
+    ASSERT_TRUE(Run(km::operations::KEY_CLEAR, other_id_node).has_value());
+    EXPECT_EQ(SlotState(upper_node), static_cast<std::uint64_t>(score::crypto::KeySlotState::kOccupied));
+
+    ASSERT_TRUE(Run(km::operations::KEY_CLEAR, mixed_node).has_value());
+    EXPECT_EQ(SlotState(upper_node), static_cast<std::uint64_t>(score::crypto::KeySlotState::kEmpty));
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point: @googletest//:gtest_main supplies main()
 // ---------------------------------------------------------------------------

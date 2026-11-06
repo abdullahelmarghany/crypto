@@ -38,3 +38,14 @@ cc_test(
     ],
 )
 
+
+
+cc_test(
+    name = "test_file_backed_slot_handler",
+    srcs = ["test_file_backed_slot_handler.cpp"],
+    deps = [
+        "//score/crypto/src/daemon/key_management",
+        "//score/crypto/src/daemon/key_management:key_management_headers",
+        "@googletest//:gtest_main",
+    ],
+)

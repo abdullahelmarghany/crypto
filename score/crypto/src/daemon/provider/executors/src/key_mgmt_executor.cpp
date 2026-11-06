@@ -85,6 +85,10 @@ Expected<common::ResponseParameters, score::crypto::daemon::common::DaemonErrorC
     {
         return HandleSlotInfo(ctx.client_id, request);
     }
+    if (action == km_ops::KEY_CLEAR)
+    {
+        return HandleClear(ctx, request);
+    }
 
     // PKCS#11-specific operations — stubs for future implementation.
     if ((action == km_ops::KEY_WRAP) || (action == km_ops::KEY_UNWRAP) || (action == km_ops::KEY_DERIVE))
@@ -460,6 +464,44 @@ KeyManagementExecutor::HandleSlotInfo(std::uint64_t client_id, common::RequestPa
     output.push_back(static_cast<std::uint64_t>(info.state));
     output.push_back(static_cast<std::uint64_t>(info.state != score::crypto::KeySlotState::kEmpty ? 1U : 0U));
     output.push_back(static_cast<std::uint64_t>(info.permitted_operations));
+    return output;
+}
+
+// ---------------------------------------------------------------------------
+// HandleClear
+//
+// Parameter layout:
+//   client_id   – authenticated client (from InitializationParams)
+//   request[0]  = slot_node_id (uint64_t)
+// ---------------------------------------------------------------------------
+
+Expected<common::ResponseParameters, score::crypto::daemon::common::DaemonErrorCode> KeyManagementExecutor::HandleClear(
+    const KeyMgmtExecutionContext& ctx,
+    common::RequestParameters& request)
+{
+    auto slot_nid_res = km_parse::ExtractUint64(request, 0U);
+    if (!slot_nid_res.has_value())
+    {
+        score::mw::log::LogError() << LOG_PREFIX << "HandleClear: invalid slot node id";
+        return score::crypto::make_unexpected(slot_nid_res.error());
+    }
+
+    auto slot_res = m_service->ResolveSlotForOperation(ctx.client_id, slot_nid_res.value());
+    if (!slot_res.has_value())
+    {
+        score::mw::log::LogError() << LOG_PREFIX << "HandleClear: slot resolution failed";
+        return score::crypto::make_unexpected(score::crypto::daemon::common::DaemonErrorCode::kInvalidArgument);
+    }
+
+    auto clear_res = m_service->ClearSlot(ctx.client_id, ctx.provider_id, slot_res.value(), *m_slot_handler);
+    if (!clear_res.has_value())
+    {
+        score::mw::log::LogError() << LOG_PREFIX << "HandleClear: ClearSlot failed";
+        return score::crypto::make_unexpected(clear_res.error());
+    }
+
+    common::ResponseParameters output;
+    output.push_back(static_cast<std::uint64_t>(0U));
     return output;
 }
 

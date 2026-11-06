@@ -33,6 +33,16 @@
         "deployment_format" : "kv"
       },
       {
+        "slot_name": "AES256_Clearable_IntegrationTestKey_OpenSSL",
+        "algorithm": "AES-256",
+        "provider_names": ["OPENSSL"],
+        "allowed_operations": "MAC",
+        "allowed_uids": [0],
+        "allowed_write_uids": [0],
+        "deployment_path" : "/opt/crypto/etc/integration_openssl_clearable.kv",
+        "deployment_format" : "kv"
+      },
+      {
         "slot_name": "HMAC_SHA256_IntegrationTestKey_OpenSSL",
         "algorithm": "HMAC-SHA256",
         "provider_names": ["OPENSSL"],
@@ -238,6 +248,11 @@
         "uid": 0,
         "app_resource_id": "test/hmac",
         "slot_name": "test/hmac-sha256"
+      },
+      {
+        "uid": 0,
+        "app_resource_id": "AES256_Clearable_IntegrationTestKey_OpenSSL",
+        "slot_name": "AES256_Clearable_IntegrationTestKey_OpenSSL"
       },
       {
         "uid": 0,

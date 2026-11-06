@@ -87,6 +87,10 @@ class KeyManagementExecutor final
     [[nodiscard]] Expected<common::ResponseParameters, score::crypto::daemon::common::DaemonErrorCode> HandleSlotInfo(
         std::uint64_t client_id,
         common::RequestParameters& request);
+
+    [[nodiscard]] Expected<common::ResponseParameters, score::crypto::daemon::common::DaemonErrorCode> HandleClear(
+        const KeyMgmtExecutionContext& ctx,
+        common::RequestParameters& request);
 };
 
 }  // namespace score::crypto::daemon::provider::crypto_executor

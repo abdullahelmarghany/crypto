@@ -63,6 +63,15 @@ class FileBackedSlotHandler final : public IKeySlotHandler
     [[nodiscard]] score::crypto::Expected<score::crypto::KeySlotState, score::crypto::daemon::common::DaemonErrorCode>
     GetSlotState(const KeySlotConfig& slot) override;
 
+    /// Securely erase the key file referenced by the deployment descriptor.
+    ///
+    /// The descriptor itself is deployment configuration and is kept; once the
+    /// key file is gone GetSlotState() reports kEmpty. Clearing an empty slot
+    /// succeeds. A symlink, a non-regular file or a file larger than
+    /// kMaxKeyFileSize is refused with kInvalidArgument and left in place.
+    [[nodiscard]] score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode> ClearSlot(
+        const KeySlotConfig& slot) override;
+
     /// Return slot metadata derived from the KeySlotConfig.
     [[nodiscard]] score::crypto::Expected<score::crypto::KeySlotInfo, score::crypto::daemon::common::DaemonErrorCode>
     GetSlotInfo(const KeySlotConfig& slot) override;

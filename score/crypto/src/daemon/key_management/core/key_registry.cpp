@@ -138,6 +138,12 @@ bool KeyRegistry::Unregister(KeyRegistryId id)
     return true;
 }
 
+void KeyRegistry::DetachSlot(SlotHandle slot_handle)
+{
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    m_slot_to_id.erase(slot_handle.index);
+}
+
 // ---------------------------------------------------------------------------
 // Crash cleanup
 // ---------------------------------------------------------------------------

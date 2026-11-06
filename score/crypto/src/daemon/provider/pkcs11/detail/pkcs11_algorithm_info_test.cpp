@@ -15,6 +15,9 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <vector>
+
 namespace score::crypto::daemon::provider::pkcs11::detail
 {
 namespace
@@ -91,6 +94,24 @@ TEST(Pkcs11AlgorithmInfoTest, EllipticCurveAndKeylessRowsHaveNoKey)
     EXPECT_FALSE(LookupAlgorithm(Row(Algorithm::kEcdsaP256)).has_value());
     EXPECT_FALSE(LookupAlgorithm(Row(Algorithm::kEcdsaP256Sha256)).has_value());
     EXPECT_FALSE(LookupAlgorithm(Row(Algorithm::kSha256)).has_value());
+}
+
+TEST(Pkcs11AlgorithmInfoTest, TryHexDecodeAcceptsLowerUpperAndMixedCase)
+{
+    const std::vector<uint8_t> expected{0xABU, 0x01U, 0xCDU};
+    EXPECT_EQ(TryHexDecode("ab01cd"), expected);
+    EXPECT_EQ(TryHexDecode("AB01CD"), expected);
+    EXPECT_EQ(TryHexDecode("aB01Cd"), expected);
+}
+
+TEST(Pkcs11AlgorithmInfoTest, TryHexDecodeRejectsMalformedInput)
+{
+    EXPECT_FALSE(TryHexDecode("").has_value());
+    EXPECT_FALSE(TryHexDecode("abc").has_value());
+    EXPECT_FALSE(TryHexDecode("0g").has_value());
+    EXPECT_FALSE(TryHexDecode("zz").has_value());
+    EXPECT_FALSE(TryHexDecode(" 01").has_value());
+    EXPECT_FALSE(TryHexDecode("0x01").has_value());
 }
 
 }  // namespace

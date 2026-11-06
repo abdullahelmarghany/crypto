@@ -276,6 +276,15 @@ class IKeyManagementContext : public IContext
     // =========================================================================
 
     /// @brief Clears a key or key slot.
+    ///
+    /// Currently only key slots (ResourceType::kKeySlot) are supported. The
+    /// stored key material is erased; clearing an empty slot succeeds. Requires
+    /// write access to the slot.
+    ///
+    /// Key handles loaded from the slot before the clear are not revoked and
+    /// stay valid until released. This is provider-dependent: PKCS#11 handles
+    /// fail immediately because the token object is destroyed. New LoadKey
+    /// calls on the cleared slot fail.
     /// @param key Handle to the key or key slot to clear.
     /// @return std::monostate on success.
     virtual score::Result<std::monostate> ClearKey(const CryptoResourceId& key) = 0;

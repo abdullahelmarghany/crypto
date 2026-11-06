@@ -195,6 +195,33 @@ Client crash:
    calls ``Release(client_id)`` on every ``KeyEntry`` that still references
    that client.
 
+Key clearing
+~~~~~~~~~~~~
+
+``ClearKey`` on a key slot sends ``KEY_CLEAR``.  The executor resolves the
+slot and calls ``KeyManagementService::ClearSlot``, which requires the client
+uid to be in ``allowed_write_uids`` and only lets the slot's primary provider
+modify key material.  The slot handler then erases the stored key:
+
+- **File-backed slots**: the key file referenced by the deployment descriptor
+  is overwritten with zeros, synced and unlinked (``SecureEraseFile``).  The
+  descriptor itself is deployment config and is kept, so the slot reports
+  ``kEmpty``.  Overwriting in place is best-effort on flash or copy-on-write
+  filesystems.
+- **PKCS#11 slots**: every token object matching the slot's class/label/ID
+  template is destroyed with ``C_DestroyObject``.
+
+Clearing an empty slot succeeds.  After a clear, the slot-to-key mapping in
+``KeyRegistry`` is detached, so new ``LoadKey`` calls read storage again and
+fail.  Handles that were loaded before the clear are not revoked; they stay
+valid until released, and their behaviour depends on the provider:
+
+- OpenSSL keys are in-memory copies and keep working until released.
+- PKCS#11 keys are looked up on each use, so they fail immediately once the
+  token object is destroyed.
+
+Revoking live handles is out of scope (follow-up).
+
 MAC Operation Example
 ---------------------
 

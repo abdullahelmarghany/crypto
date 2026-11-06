@@ -269,6 +269,7 @@ cc_test(
         "//score/crypto/src/daemon/key_management",
         "//score/crypto/src/daemon/key_management:key_management_headers",
         "//score/tests/utility",
+        "@score_openssl//:openssl",
         "@googletest//:gtest_main",
     ],
 )

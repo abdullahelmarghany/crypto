@@ -202,6 +202,25 @@ cc_binary(
 )
 
 cc_binary(
+    name = "score_api_key_slot_store_test",
+    srcs = ["score_api_key_slot_store_test.cpp"],
+    data = [
+        "//score/tests/test_vectors/config:integration_test_config",
+        "//score/tests/test_vectors/mac:mac_test_vectors",
+    ],
+    dynamic_deps = ["//third_party/grpc:libgrpc_shared"],
+    target_compatible_with = select({
+        "//score/crypto/src/backend:openssl_backend_active": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        "//score/crypto/src/api:crypto_stack",
+        "//score/tests/utility",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_binary(
     name = "score_api_key_permissions_test",
     srcs = ["score_api_key_permissions_test.cpp"],
     data = [
@@ -264,6 +283,7 @@ integration_test(
             ":score_api_signature_test",
             ":score_api_key_import_export_test",
             ":score_api_key_clear_test",
+            ":score_api_key_slot_store_test",
         ],
         "//conditions:default": [],
     }),

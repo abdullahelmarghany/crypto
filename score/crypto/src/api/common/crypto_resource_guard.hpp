@@ -60,7 +60,7 @@ class CryptoResourceGuardFactory;
 ///
 ///   // PersistKey copies the key to persistent storage.
 ///   // The guard remains active and releases the ephemeral copy independently.
-///   key_mgmt->PersistKey(guard, slot).value();
+///   key_mgmt->PersistKey(slot, guard).value();
 ///   // guard still active; ephemeral copy released when guard goes out of scope.
 /// @endcode
 ///

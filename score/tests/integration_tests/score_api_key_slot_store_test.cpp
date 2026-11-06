@@ -1,0 +1,217 @@
+/********************************************************************************
+ * Copyright (c) 2026 Contributors to the Eclipse Foundation
+ *
+ * See the NOTICE file(s) distributed with this work for additional
+ * information regarding copyright ownership.
+ *
+ * This program and the accompanying materials are made available under the
+ * terms of the Apache License Version 2.0 which is available at
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ ********************************************************************************/
+
+/// @file score_api_key_slot_store_test.cpp
+/// @brief End-to-end tests for storing keys into key slots.
+///
+/// Covers GenerateKey and ImportKey into a slot and PersistKey of an ephemeral
+/// key, each followed by LoadKey and an HMAC-SHA256 computation with the stored
+/// key. Each test writes its own empty slot (see integration_test_config.json);
+/// a slot cannot be emptied again, so every test runs once per daemon instance.
+
+#include "score/crypto/src/api/config/key_management_context_config.hpp"
+#include "score/crypto/src/api/config/key_operation_params.hpp"
+#include "score/crypto/src/api/config/mac_context_config.hpp"
+#include "score/crypto/src/api/contexts/i_key_management_context.hpp"
+#include "score/crypto/src/api/contexts/i_mac_context.hpp"
+#include "score/crypto/src/api/crypto_stack_factory.hpp"
+#include "score/crypto/src/api/i_crypto_context.hpp"
+#include "score/crypto/src/api/i_crypto_stack.hpp"
+#include "score/crypto/src/api/types/common.hpp"
+#include "score/crypto/src/api/types/key.hpp"
+#include "score/result/result.h"
+#include "score/tests/utility/test_utility.hpp"
+
+#include <gtest/gtest.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+using namespace score::crypto;
+using tests::utility::read_bin;
+
+namespace
+{
+
+#ifdef __QNXNTO__
+constexpr auto kControlSocketEndpoint = "unix:///opt/crypto_daemon.sock";
+#else
+constexpr auto kControlSocketEndpoint = "unix:///tmp/crypto_daemon.sock";
+#endif
+
+constexpr std::string_view kSlotAlgorithm = "HMAC-SHA256";
+constexpr std::string_view kMacAlgorithm = "HMAC-SHA256";
+constexpr std::size_t kMacSize = 32U;
+
+constexpr std::string_view kGenerateSlot = "Store_Generate_OpenSSL";
+constexpr std::string_view kImportSlot = "Store_Import_OpenSSL";
+constexpr std::string_view kPersistSlot = "Store_Persist_OpenSSL";
+
+std::string GetTestVectorPath(const std::string_view relative_path)
+{
+    const char* dir = std::getenv("TEST_VECTORS_DIR");
+    return std::string{dir != nullptr ? dir : "/opt/crypto/share/test_vectors"} + std::string{relative_path};
+}
+
+class KeySlotStoreTest : public ::testing::Test
+{
+  protected:
+    void SetUp() override
+    {
+        CryptoStackConfig stack_config;
+        stack_config.SetConnectionEndpoint(kControlSocketEndpoint);
+        auto stack = CreateCryptoStack(stack_config);
+        ASSERT_TRUE(stack.has_value()) << "Failed to create crypto stack";
+        stack_ = std::move(stack.value());
+
+        auto ctx = stack_->CreateCryptoContext();
+        ASSERT_TRUE(ctx.has_value()) << "Failed to create crypto context";
+        ctx_ = std::move(ctx.value());
+
+        KeyManagementContextConfig key_mgmt_config;
+        key_mgmt_config.SetProviderType(ProviderType::kSoftware);
+        auto key_mgmt = ctx_->CreateKeyManagementContext(key_mgmt_config);
+        ASSERT_TRUE(key_mgmt.has_value()) << "Failed to create key management context";
+        key_mgmt_ = std::move(key_mgmt.value());
+    }
+
+    CryptoResourceId ResolveSlot(std::string_view name)
+    {
+        auto slot = ctx_->ResolveResource(std::string{name}, ResourceType::kKeySlot);
+        EXPECT_TRUE(slot.has_value()) << "Failed to resolve key slot " << name;
+        return slot.has_value() ? slot.value() : CryptoResourceId{};
+    }
+
+    /// HMAC-SHA256 of @p data with @p key, via a single Init/Update/Finalize.
+    std::vector<std::uint8_t> ComputeMac(const CryptoResourceId& key, const std::vector<std::uint8_t>& data)
+    {
+        MacContextConfig mac_config;
+        mac_config.SetAlgorithm(std::string{kMacAlgorithm}).SetKey(key).SetProviderType(ProviderType::kSoftware);
+        auto mac = ctx_->CreateMacContext(mac_config);
+        EXPECT_TRUE(mac.has_value()) << "Failed to create MAC context";
+        if (!mac.has_value())
+        {
+            return {};
+        }
+        std::vector<std::uint8_t> out(kMacSize, 0U);
+        EXPECT_TRUE(mac.value()->Init().has_value());
+        EXPECT_TRUE(mac.value()->Update({data.data(), data.size()}).has_value());
+        auto written = mac.value()->Finalize({out.data(), out.size()});
+        EXPECT_TRUE(written.has_value());
+        return out;
+    }
+
+    ICryptoStack::Uptr stack_;
+    ICryptoContext::Uptr ctx_;
+    std::unique_ptr<IKeyManagementContext> key_mgmt_;
+    const std::vector<std::uint8_t> input_ = read_bin(GetTestVectorPath("/mac/input_hello_world.bin"));
+};
+
+TEST_F(KeySlotStoreTest, ImportKeyIntoSlot_MacMatchesKnownAnswer)
+{
+    const auto key_bytes = read_bin(GetTestVectorPath("/mac/key_aes_256.key"));
+    const auto expected_mac = read_bin(GetTestVectorPath("/mac/hmac_sha256_hello_world.bin"));
+    ASSERT_FALSE(key_bytes.empty());
+    ASSERT_EQ(expected_mac.size(), kMacSize);
+    const auto slot = ResolveSlot(kImportSlot);
+
+    ImportKeyParams params;
+    params.SetKeyData(key_bytes.data(), key_bytes.size())
+        .SetFormat(FormatType::kRaw)
+        .SetAlgorithm(std::string{kSlotAlgorithm});
+    auto stored = key_mgmt_->ImportKey(slot, params);
+    ASSERT_TRUE(stored.has_value()) << "ImportKey into slot failed: " << stored.error().Message();
+
+    auto key = key_mgmt_->LoadKey(slot);
+    ASSERT_TRUE(key.has_value()) << "LoadKey from stored slot failed";
+    EXPECT_EQ(ComputeMac(key.value(), input_), expected_mac);
+
+    // The slot is now occupied: neither import nor generate may replace the key.
+    auto again = key_mgmt_->ImportKey(slot, params);
+    ASSERT_FALSE(again.has_value());
+    EXPECT_EQ(*again.error(), static_cast<score::result::ErrorCode>(CryptoErrorCode::kKeySlotOccupied))
+        << again.error().Message();
+
+    GenerateKeyParams gen;
+    gen.SetAlgorithm(std::string{kSlotAlgorithm});
+    auto generated = key_mgmt_->GenerateKey(slot, std::nullopt, gen);
+    ASSERT_FALSE(generated.has_value());
+    EXPECT_EQ(*generated.error(), static_cast<score::result::ErrorCode>(CryptoErrorCode::kKeySlotOccupied))
+        << generated.error().Message();
+}
+
+TEST_F(KeySlotStoreTest, GenerateKeyIntoSlot_KeyLoadsAndIsStable)
+{
+    const auto slot = ResolveSlot(kGenerateSlot);
+
+    GenerateKeyParams wrong;
+    wrong.SetAlgorithm("AES-128");
+    auto mismatch = key_mgmt_->GenerateKey(slot, std::nullopt, wrong);
+    ASSERT_FALSE(mismatch.has_value());
+    EXPECT_EQ(*mismatch.error(), static_cast<score::result::ErrorCode>(CryptoErrorCode::kAlgorithmMismatch))
+        << mismatch.error().Message();
+
+    GenerateKeyParams params;
+    params.SetAlgorithm(std::string{kSlotAlgorithm});
+    auto stored = key_mgmt_->GenerateKey(slot, std::nullopt, params);
+    ASSERT_TRUE(stored.has_value()) << "GenerateKey into slot failed: " << stored.error().Message();
+
+    // Two loads of the slot yield the same key material.
+    auto first = key_mgmt_->LoadKey(slot);
+    ASSERT_TRUE(first.has_value());
+    const auto mac_first = ComputeMac(first.value(), input_);
+    static_cast<void>(first.value().Release());
+
+    auto second = key_mgmt_->LoadKey(slot);
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(ComputeMac(second.value(), input_), mac_first);
+}
+
+TEST_F(KeySlotStoreTest, PersistKey_SlotKeyMatchesEphemeralKey)
+{
+    const auto slot = ResolveSlot(kPersistSlot);
+
+    GenerateKeyParams params;
+    params.SetAlgorithm(std::string{kSlotAlgorithm}).SetPermissions(KeyOperationPermission::kMac);
+    auto ephemeral = key_mgmt_->GenerateKey(params);
+    ASSERT_TRUE(ephemeral.has_value()) << "GenerateKey failed";
+
+    auto persisted = key_mgmt_->PersistKey(slot, ephemeral.value());
+    ASSERT_TRUE(persisted.has_value()) << "PersistKey failed: " << persisted.error().Message();
+
+    // The ephemeral key is still usable and the slot holds the same material.
+    const auto ephemeral_mac = ComputeMac(ephemeral.value(), input_);
+    auto loaded = key_mgmt_->LoadKey(slot);
+    ASSERT_TRUE(loaded.has_value()) << "LoadKey from persisted slot failed";
+    EXPECT_EQ(ComputeMac(loaded.value(), input_), ephemeral_mac);
+
+    auto again = key_mgmt_->PersistKey(slot, ephemeral.value());
+    ASSERT_FALSE(again.has_value());
+    EXPECT_EQ(*again.error(), static_cast<score::result::ErrorCode>(CryptoErrorCode::kKeySlotOccupied))
+        << again.error().Message();
+}
+
+}  // namespace
+
+int main(int argc, char** argv)
+{
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
+}

@@ -270,6 +270,20 @@ class TestCryptoDaemon:
             },
         )
 
+    def test_score_api_key_slot_store(
+        self, target: Target, target_os: str, install_dir: str, openssl_backend: None
+    ):
+        """Test SCORE GenerateKey/ImportKey into a slot and PersistKey end to end."""
+        run_test_app(
+            target,
+            target_os,
+            Path(f"{install_dir}/bin/score_api_key_slot_store_test"),
+            env={
+                "LD_LIBRARY_PATH": f"{install_dir}/lib",
+                "TEST_VECTORS_DIR": f"{install_dir}/share/test_vectors",
+            },
+        )
+
     def test_hash_performance_test(self, target: Target, target_os: str, install_dir: str):
         """Test concurrent and sequential hash operations."""
         run_test_app(

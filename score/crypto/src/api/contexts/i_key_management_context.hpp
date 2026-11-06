@@ -117,6 +117,12 @@ class IKeyManagementContext : public IContext
     ///                    Ignored for symmetric algorithms. If provided for asymmetric,
     ///                    the public key is generated directly into this slot.
     /// @param params Key generation parameters (algorithm, permissions).
+    ///
+    /// Requires slot write access. params.algorithm must be the slot's algorithm.
+    /// The stored key is used with the slot's configured allowed operations;
+    /// params.permissions do not apply to it. A public_slot for an asymmetric
+    /// algorithm is not supported yet (kUnsupportedOperation).
+    ///
     /// @return std::monostate on success; error if slot is occupied, policy violation, etc.
     virtual score::Result<std::monostate> GenerateKey(const CryptoResourceId& target_slot,
                                                       const std::optional<CryptoResourceId>& public_slot,
@@ -177,6 +183,11 @@ class IKeyManagementContext : public IContext
     ///
     /// @param target_slot Handle to the target persistent key slot (type = kKeySlot).
     /// @param ephemeral_key CryptoResourceId of the ephemeral key (type = kKey).
+    ///
+    /// Requires slot write access and a key of the slot's algorithm whose
+    /// permissions cover the slot's allowed operations, so persisting never
+    /// widens what the key may be used for.
+    ///
     /// @return std::monostate on success, error if not allowed by policy or slot is occupied.
     virtual score::Result<std::monostate> PersistKey(const CryptoResourceId& target_slot,
                                                      const CryptoResourceId& ephemeral_key) = 0;
@@ -208,6 +219,10 @@ class IKeyManagementContext : public IContext
     virtual score::Result<CryptoResourceGuard> ImportKey(const ImportKeyParams& params) = 0;
 
     /// @brief Imports key data directly into a persistent key slot.
+    ///
+    /// Same rules as GenerateKey() into a slot: write access, matching
+    /// algorithm, empty slot; the slot's allowed operations govern the key.
+    ///
     /// @param target_slot Handle to the target key slot (type = kKeySlot).
     /// @param params Import parameters.
     /// @return std::monostate on success.

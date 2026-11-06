@@ -23,6 +23,7 @@
 
 #include "score/crypto/src/api/control_plane/i_connection.hpp"
 #include "score/crypto/src/daemon/common/actors.hpp"
+#include "score/crypto/src/daemon/common/algorithm_catalog.hpp"
 #include "score/crypto/src/daemon/control_plane/control_protocol.h"
 #include "score/crypto/src/daemon/key_management/interfaces/key_management_operations.hpp"
 #include "score/crypto/src/daemon/mediator/mediator_operations.hpp"
@@ -310,19 +311,72 @@ score::Result<CryptoResourceGuard> KeyManagementContextImpl::LoadKey(const Crypt
 }
 
 // ---------------------------------------------------------------------------
-// Stubs — not yet implemented
+// Key Generation — into a slot
 // ---------------------------------------------------------------------------
-score::Result<std::monostate> KeyManagementContextImpl::GenerateKey(
-    const CryptoResourceId& /*target_slot*/,
-    const std::optional<CryptoResourceId>& /*public_slot*/,
-    const GenerateKeyParams& /*params*/)
+score::Result<std::monostate> KeyManagementContextImpl::GenerateKey(const CryptoResourceId& target_slot,
+                                                                    const std::optional<CryptoResourceId>& public_slot,
+                                                                    const GenerateKeyParams& params)
 {
-    score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR: GenerateKey with target_slot not yet implemented";
-    return score::Result<std::monostate>{
-        score::unexpect,
-        MakeError(CryptoErrorCode::kUnsupportedOperation, "GenerateKey with target_slot not yet implemented")};
+    if (target_slot.type != ResourceType::kKeySlot)
+    {
+        score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR: GenerateKey called with invalid slot type";
+        return score::Result<std::monostate>{
+            score::unexpect, MakeError(CryptoErrorCode::kInvalidArgument, "GenerateKey called with invalid slot type")};
+    }
+    // public_slot is ignored for symmetric algorithms. The slot handlers store
+    // one key per slot, so a separate public-key slot is not supported yet.
+    const auto descriptor = GetAlgorithmDescriptor(params.algorithm);
+    const bool is_symmetric = descriptor.has_value() &&
+                              ((descriptor->key_type == KeyType::kSecret) || (descriptor->key_type == KeyType::kAes));
+    if (public_slot.has_value() && !is_symmetric)
+    {
+        score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR: GenerateKey public_slot not supported";
+        return score::Result<std::monostate>{
+            score::unexpect,
+            MakeError(CryptoErrorCode::kUnsupportedOperation, "GenerateKey public_slot not supported")};
+    }
+
+    auto request_builder = proto::ControlRequestBuilder()
+                               .forDataNodeId(m_context_id)
+                               .operation({actors::OP_ACTOR_KEY_MANAGEMENT, keymgmt_ops::KEY_GENERATE_TO_SLOT})
+                               .with_in_val_uint64(target_slot.id)
+                               .with_in_string(params.algorithm)
+                               .with_in_val_uint32(static_cast<std::uint32_t>(params.permissions));
+    if (params.public_key_permissions.has_value())
+    {
+        request_builder =
+            request_builder.with_in_val_uint32(static_cast<std::uint32_t>(params.public_key_permissions.value()));
+    }
+
+    auto control_req_result = request_builder.build();
+    if (!control_req_result.has_value())
+    {
+        score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR: Failed to build KEY_GENERATE_TO_SLOT request";
+        return score::Result<std::monostate>{
+            score::unexpect,
+            MakeError(CryptoErrorCode::kKeyGenerationFailed, "Failed to build KEY_GENERATE_TO_SLOT request")};
+    }
+
+    auto control_response_res = m_connection->SendRequest(control_req_result.value());
+
+    auto validator = proto::ControlResponseValidator::FromResult(control_response_res);
+    validator.expectOperation({actors::OP_ACTOR_KEY_MANAGEMENT, keymgmt_ops::KEY_GENERATE_TO_SLOT}).expectSuccess();
+
+    if (!validator.isValid())
+    {
+        score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR:" << validator.getError();
+        return score::Result<std::monostate>{
+            score::unexpect,
+            MakeError(validator.getOperationError().value_or(CryptoErrorCode::kKeyGenerationFailed),
+                      "KEY_GENERATE_TO_SLOT daemon response invalid")};
+    }
+
+    return std::monostate{};
 }
 
+// ---------------------------------------------------------------------------
+// Stubs — not yet implemented
+// ---------------------------------------------------------------------------
 score::Result<CryptoResourceGuard> KeyManagementContextImpl::DeriveKey(const DeriveKeyParams& /*params*/)
 {
     score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR: DeriveKey not yet implemented";
@@ -353,12 +407,45 @@ score::Result<std::monostate> KeyManagementContextImpl::AgreeKey(const CryptoRes
         score::unexpect, MakeError(CryptoErrorCode::kUnsupportedOperation, "AgreeKey not yet implemented")};
 }
 
-score::Result<std::monostate> KeyManagementContextImpl::PersistKey(const CryptoResourceId& /*target_slot*/,
-                                                                   const CryptoResourceId& /*ephemeral_key*/)
+score::Result<std::monostate> KeyManagementContextImpl::PersistKey(const CryptoResourceId& target_slot,
+                                                                   const CryptoResourceId& ephemeral_key)
 {
-    score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR: PersistKey not yet implemented";
-    return score::Result<std::monostate>{
-        score::unexpect, MakeError(CryptoErrorCode::kUnsupportedOperation, "PersistKey not yet implemented")};
+    if ((target_slot.type != ResourceType::kKeySlot) || (ephemeral_key.type != ResourceType::kKey))
+    {
+        score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR: PersistKey called with invalid resource type";
+        return score::Result<std::monostate>{
+            score::unexpect,
+            MakeError(CryptoErrorCode::kInvalidArgument, "PersistKey called with invalid resource type")};
+    }
+
+    auto control_req_result = proto::ControlRequestBuilder()
+                                  .forDataNodeId(m_context_id)
+                                  .operation({actors::OP_ACTOR_KEY_MANAGEMENT, keymgmt_ops::KEY_PERSIST})
+                                  .with_in_val_uint64(target_slot.id)
+                                  .with_in_val_uint64(ephemeral_key.id)
+                                  .build();
+    if (!control_req_result.has_value())
+    {
+        score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR: Failed to build KEY_PERSIST request";
+        return score::Result<std::monostate>{
+            score::unexpect, MakeError(CryptoErrorCode::kOperationFailed, "Failed to build KEY_PERSIST request")};
+    }
+
+    auto control_response_res = m_connection->SendRequest(control_req_result.value());
+
+    auto validator = proto::ControlResponseValidator::FromResult(control_response_res);
+    validator.expectOperation({actors::OP_ACTOR_KEY_MANAGEMENT, keymgmt_ops::KEY_PERSIST}).expectSuccess();
+
+    if (!validator.isValid())
+    {
+        score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR:" << validator.getError();
+        return score::Result<std::monostate>{
+            score::unexpect,
+            MakeError(validator.getOperationError().value_or(CryptoErrorCode::kOperationFailed),
+                      "KEY_PERSIST daemon response invalid")};
+    }
+
+    return std::monostate{};
 }
 
 score::Result<CryptoResourceGuard> KeyManagementContextImpl::UnwrapKey(const UnwrapKeyParams& /*params*/)
@@ -461,12 +548,71 @@ score::Result<CryptoResourceGuard> KeyManagementContextImpl::ImportKey(const Imp
     return CryptoResourceGuardFactory::Make(m_release_callback, resource_id);
 }
 
-score::Result<std::monostate> KeyManagementContextImpl::ImportKey(const CryptoResourceId& /*target_slot*/,
-                                                                  const ImportKeyParams& /*params*/)
+score::Result<std::monostate> KeyManagementContextImpl::ImportKey(const CryptoResourceId& target_slot,
+                                                                  const ImportKeyParams& params)
 {
-    score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR: ImportKey not yet implemented";
-    return score::Result<std::monostate>{
-        score::unexpect, MakeError(CryptoErrorCode::kUnsupportedOperation, "ImportKey not yet implemented")};
+    if (target_slot.type != ResourceType::kKeySlot)
+    {
+        score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR: ImportKey called with invalid slot type";
+        return score::Result<std::monostate>{
+            score::unexpect, MakeError(CryptoErrorCode::kInvalidArgument, "ImportKey called with invalid slot type")};
+    }
+    if ((params.key_data.data() == nullptr) || params.key_data.empty())
+    {
+        score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR: ImportKey called with empty key_data";
+        return score::Result<std::monostate>{
+            score::unexpect, MakeError(CryptoErrorCode::kInvalidArgument, "ImportKey called with empty key_data")};
+    }
+    if (m_transcoder == nullptr)
+    {
+        score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR: ImportKey requires a buffer transcoder";
+        return score::Result<std::monostate>{
+            score::unexpect, MakeError(CryptoErrorCode::kOperationFailed, "ImportKey requires a buffer transcoder")};
+    }
+
+    proto::OperationRequestBuilder builder;
+    builder.operation({actors::OP_ACTOR_KEY_MANAGEMENT, keymgmt_ops::KEY_IMPORT_TO_SLOT})
+        .with_in_val_uint64(target_slot.id)
+        .with_in_string(params.algorithm)
+        .with_in_val_uint32(static_cast<std::uint32_t>(params.permissions))
+        .with_in_val_uint32(keymgmt_ops::EncodeFormat(params.format));
+
+    // Key material goes through the data plane, appended last as in ImportKey(params).
+    auto tspan_result = m_transcoder->Acquire(params.key_data, /*is_output=*/false);
+    if (!tspan_result.has_value())
+    {
+        return score::Result<std::monostate>{score::unexpect, tspan_result.error()};
+    }
+    TranscoderSpan tspan = std::move(tspan_result.value());
+    m_transcoder->AppendInputBuffer(builder, tspan);
+
+    auto operation_req_result = builder.build();
+    if (!operation_req_result.has_value())
+    {
+        score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR: Failed to build KEY_IMPORT_TO_SLOT request";
+        return score::Result<std::monostate>{
+            score::unexpect,
+            MakeError(CryptoErrorCode::kOperationFailed, "Failed to build KEY_IMPORT_TO_SLOT request")};
+    }
+
+    proto::ControlRequest control_req{};
+    control_req.operation = operation_req_result.value();
+    control_req.data_node_id = m_context_id;
+    auto control_response_res = m_connection->SendRequest(control_req);
+
+    auto validator = proto::ControlResponseValidator::FromResult(control_response_res);
+    validator.expectOperation({actors::OP_ACTOR_KEY_MANAGEMENT, keymgmt_ops::KEY_IMPORT_TO_SLOT}).expectSuccess();
+
+    if (!validator.isValid())
+    {
+        score::mw::log::LogError() << "[API][KeyMgmtContextImpl] ERROR:" << validator.getError();
+        return score::Result<std::monostate>{
+            score::unexpect,
+            MakeError(validator.getOperationError().value_or(CryptoErrorCode::kOperationFailed),
+                      "KEY_IMPORT_TO_SLOT daemon response invalid")};
+    }
+
+    return std::monostate{};
 }
 
 score::Result<std::size_t> KeyManagementContextImpl::WrapKey(const WrapKeyParams& /*params*/,

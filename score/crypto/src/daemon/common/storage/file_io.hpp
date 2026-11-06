@@ -71,6 +71,26 @@ using FileWriter = std::function<score::crypto::Expected<std::monostate, DaemonE
 ///         kInvalidArgument if path is empty, kPersistFailed on a filesystem error.
 [[nodiscard]] score::crypto::Expected<std::monostate, DaemonErrorCode> RemoveFile(const std::string& path);
 
+/// Overwrite the regular file at @p path with zeros, flush it, unlink it and
+/// flush the parent directory.
+///
+/// Symlinks are refused and so is anything that is not a regular file or is
+/// larger than @p max_size; such a file is left untouched. The path is checked
+/// with lstat before opening and the opened file must be the same inode, so a
+/// symlink swapped in between is refused before anything is written. The limit
+/// keeps a wrong path from destroying a file that cannot be a key and bounds
+/// the time spent overwriting. The overwrite is best-effort: on flash media (wear levelling) and on
+/// copy-on-write or journaling filesystems the old blocks may survive, so key
+/// material must not be copied to other persistent locations either.
+///
+/// @return std::monostate on success; kInvalidArgument if path is empty, a
+///         symlink, not a regular file or larger than @p max_size;
+///         kResourceNotAllocated if the file is
+///         absent; kAccessDenied if it cannot be opened for writing;
+///         kPersistFailed on a write, sync or unlink failure.
+[[nodiscard]] score::crypto::Expected<std::monostate, DaemonErrorCode> SecureEraseFile(const std::string& path,
+                                                                                       std::size_t max_size);
+
 }  // namespace score::crypto::daemon::common::storage
 
 #endif  // SCORE_CRYPTO_SRC_DAEMON_COMMON_STORAGE_FILE_IO_HPP

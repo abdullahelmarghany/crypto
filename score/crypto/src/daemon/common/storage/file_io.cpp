@@ -16,6 +16,15 @@
 #include "score/filesystem/filestream/file_factory.h"
 #include "score/filesystem/filestream/file_stream.h"
 #include "score/filesystem/filesystem.h"
+#include "score/os/fcntl.h"
+#include "score/os/stat.h"
+#include "score/os/unistd.h"
+
+#include <sys/stat.h>
+
+#include <array>
+#include <cerrno>
+#include <cstdint>
 
 namespace score::crypto::daemon::common::storage
 {
@@ -123,6 +132,145 @@ score::crypto::Expected<std::monostate, DaemonErrorCode> RemoveFile(const std::s
             return std::monostate{};
         return score::crypto::make_unexpected(DaemonErrorCode::kPersistFailed);
     }
+    return std::monostate{};
+}
+
+namespace
+{
+
+/// Flush the directory holding @p path so that a preceding unlink or link is durable.
+bool SyncParentDirectory(const std::string& path)
+{
+    auto parent = score::filesystem::Path{path}.ParentPath();
+    if (parent.Empty())
+    {
+        parent = score::filesystem::Path{"."};
+    }
+    score::filesystem::StandardFilesystem standard{};
+    score::filesystem::FileFactory streams{};
+    const score::filesystem::FileUtils utils{standard, streams};
+    return utils.SyncDirectory(parent).has_value();
+}
+
+bool IsInterrupted(const score::os::Error& error)
+{
+    return error.GetOsDependentErrorCode() == EINTR;
+}
+
+bool OverwriteWithZeros(std::int32_t fd, std::int64_t size)
+{
+    static constexpr std::array<std::uint8_t, 4096U> kZeros{};
+    std::int64_t offset = 0;
+    while (offset < size)
+    {
+        const auto remaining = static_cast<std::size_t>(size - offset);
+        const std::size_t chunk = remaining < kZeros.size() ? remaining : kZeros.size();
+        const auto written = score::os::Unistd::instance().pwrite(fd, kZeros.data(), chunk, static_cast<off_t>(offset));
+        if (!written.has_value())
+        {
+            if (IsInterrupted(written.error()))
+                continue;
+            return false;
+        }
+        if (written.value() <= 0)
+            return false;
+        offset += static_cast<std::int64_t>(written.value());
+    }
+    return true;
+}
+
+bool Fsync(std::int32_t fd)
+{
+    for (;;)
+    {
+        const auto result = score::os::Unistd::instance().fsync(fd);
+        if (result.has_value())
+            return true;
+        if (!IsInterrupted(result.error()))
+            return false;
+    }
+}
+
+DaemonErrorCode OpenErrorToDaemonError(const score::os::Error& error)
+{
+    switch (error.GetOsDependentErrorCode())
+    {
+        case ENOENT:
+            return DaemonErrorCode::kResourceNotAllocated;
+        case ELOOP:
+        case EISDIR:
+        case ENXIO:
+            return DaemonErrorCode::kInvalidArgument;
+        case EACCES:
+        case EPERM:
+        case EROFS:
+            return DaemonErrorCode::kAccessDenied;
+        default:
+            return DaemonErrorCode::kPersistFailed;
+    }
+}
+
+bool IsErasable(const score::os::StatBuffer& st, std::size_t max_size)
+{
+    return S_ISREG(st.st_mode) && (st.st_size >= 0) && (static_cast<std::uintmax_t>(st.st_size) <= max_size);
+}
+
+}  // namespace
+
+score::crypto::Expected<std::monostate, DaemonErrorCode> SecureEraseFile(const std::string& path, std::size_t max_size)
+{
+    if (path.empty())
+        return score::crypto::make_unexpected(DaemonErrorCode::kInvalidArgument);
+
+    // score::os::Fcntl cannot express O_NOFOLLOW. Inspect the path itself first, then require that
+    // the opened file is the same inode, so a symlink swapped in between is never written through.
+    score::os::StatBuffer link_status{};
+    const auto lstat_result = score::os::Stat::instance().stat(path.c_str(), link_status, false);
+    if (!lstat_result.has_value())
+        return score::crypto::make_unexpected(OpenErrorToDaemonError(lstat_result.error()));
+    if (!IsErasable(link_status, max_size))
+        return score::crypto::make_unexpected(DaemonErrorCode::kInvalidArgument);
+
+    // kNonBlocking keeps a FIFO swapped in after the check from blocking the open.
+    using Open = score::os::Fcntl::Open;
+    constexpr auto kFlags = Open::kWriteOnly | Open::kCloseOnExec | Open::kNonBlocking;
+    auto opened = score::os::Fcntl::instance().open(path.c_str(), kFlags);
+    while (!opened.has_value() && IsInterrupted(opened.error()))
+    {
+        opened = score::os::Fcntl::instance().open(path.c_str(), kFlags);
+    }
+    if (!opened.has_value())
+        return score::crypto::make_unexpected(OpenErrorToDaemonError(opened.error()));
+    const std::int32_t fd = opened.value();
+
+    score::os::StatBuffer file_status{};
+    if (!score::os::Stat::instance().fstat(fd, file_status).has_value())
+    {
+        static_cast<void>(score::os::Unistd::instance().close(fd));
+        return score::crypto::make_unexpected(DaemonErrorCode::kPersistFailed);
+    }
+    if (!IsErasable(file_status, max_size) || (file_status.st_dev != link_status.st_dev) ||
+        (file_status.st_ino != link_status.st_ino))
+    {
+        static_cast<void>(score::os::Unistd::instance().close(fd));
+        return score::crypto::make_unexpected(DaemonErrorCode::kInvalidArgument);
+    }
+
+    if (!OverwriteWithZeros(fd, file_status.st_size) || !Fsync(fd))
+    {
+        static_cast<void>(score::os::Unistd::instance().close(fd));
+        return score::crypto::make_unexpected(DaemonErrorCode::kPersistFailed);
+    }
+    const auto closed = score::os::Unistd::instance().close(fd);
+    if (!closed.has_value() && !IsInterrupted(closed.error()))
+        return score::crypto::make_unexpected(DaemonErrorCode::kPersistFailed);
+
+    if (!score::os::Unistd::instance().unlink(path.c_str()).has_value())
+        return score::crypto::make_unexpected(DaemonErrorCode::kPersistFailed);
+
+    // Make the unlink durable.
+    if (!SyncParentDirectory(path))
+        return score::crypto::make_unexpected(DaemonErrorCode::kPersistFailed);
     return std::monostate{};
 }
 

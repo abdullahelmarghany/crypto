@@ -40,6 +40,9 @@ cc_library(
         "//score/crypto/src/common:common_types",
         "//score/crypto/src/daemon/common",
         "@score_baselibs//score/filesystem",
+        "@score_baselibs//score/os:fcntl",
+        "@score_baselibs//score/os:stat",
+        "@score_baselibs//score/os:unistd",
     ],
 )
 
@@ -78,6 +81,9 @@ cc_test(
     deps = [
         ":file_io",
         "@googletest//:gtest_main",
+        "@score_baselibs//score/os/mocklib:fcntl_mock",
+        "@score_baselibs//score/os/mocklib:stat_mock",
+        "@score_baselibs//score/os/mocklib:unistd_mock",
     ],
 )
 

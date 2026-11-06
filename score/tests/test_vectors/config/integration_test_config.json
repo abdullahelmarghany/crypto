@@ -291,6 +291,36 @@
         "allowed_write_uids": [0],
         "deployment_path" : "/opt/crypto/etc/integration_openssl_store_keypair_public.kv",
         "deployment_format" : "kv"
+      },
+      {
+        "slot_name": "Store_Generate_PKCS11",
+        "algorithm": "HMAC-SHA256",
+        "provider_names": ["PKCS11_ENGINE"],
+        "allowed_operations": "MAC",
+        "allowed_uids": [0, 1000],
+        "allowed_write_uids": [0],
+        "deployment_path" : "/opt/crypto/etc/integration_softhsm_store_generate.kv",
+        "deployment_format" : "kv"
+      },
+      {
+        "slot_name": "Store_Import_PKCS11",
+        "algorithm": "HMAC-SHA256",
+        "provider_names": ["PKCS11_ENGINE"],
+        "allowed_operations": "MAC",
+        "allowed_uids": [0, 1000],
+        "allowed_write_uids": [0],
+        "deployment_path" : "/opt/crypto/etc/integration_softhsm_store_import.kv",
+        "deployment_format" : "kv"
+      },
+      {
+        "slot_name": "Store_Persist_PKCS11",
+        "algorithm": "HMAC-SHA256",
+        "provider_names": ["PKCS11_ENGINE"],
+        "allowed_operations": "MAC",
+        "allowed_uids": [0, 1000],
+        "allowed_write_uids": [0],
+        "deployment_path" : "/opt/crypto/etc/integration_softhsm_store_persist.kv",
+        "deployment_format" : "kv"
       }
     ],
     "app_key_slot_mappings": [
@@ -543,6 +573,21 @@
         "uid": 0,
         "app_resource_id": "Store_KeyPair_Public_OpenSSL",
         "slot_name": "Store_KeyPair_Public_OpenSSL"
+      },
+      {
+        "uid": 0,
+        "app_resource_id": "Store_Generate_PKCS11",
+        "slot_name": "Store_Generate_PKCS11"
+      },
+      {
+        "uid": 0,
+        "app_resource_id": "Store_Import_PKCS11",
+        "slot_name": "Store_Import_PKCS11"
+      },
+      {
+        "uid": 0,
+        "app_resource_id": "Store_Persist_PKCS11",
+        "slot_name": "Store_Persist_PKCS11"
       }
     ]
   }

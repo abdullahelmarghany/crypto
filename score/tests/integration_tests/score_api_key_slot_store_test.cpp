@@ -16,7 +16,9 @@
 ///
 /// Covers GenerateKey and ImportKey into a slot and PersistKey of an ephemeral
 /// key, each followed by LoadKey and an HMAC-SHA256 computation with the stored
-/// key, and GenerateKey of an ECDSA key pair into a private and a public slot. Each test writes its own empty slot (see
+/// key, and GenerateKey of an ECDSA key pair into a private and a public slot.
+/// With the PKCS#11 backend, generate, import and persist also run against
+/// SoftHSM slots. Each test writes its own empty slot (see
 /// integration_test_config.json); a slot cannot be emptied again, so every test runs once per daemon instance.
 
 #include "score/crypto/src/api/config/key_management_context_config.hpp"
@@ -108,11 +110,21 @@ class KeySlotStoreTest : public ::testing::Test
         return slot.has_value() ? slot.value() : CryptoResourceId{};
     }
 
+    /// The slot reports @p expected through GetKeySlotInfo().
+    static void ExpectSlotState(IKeyManagementContext& key_mgmt, const CryptoResourceId& slot, KeySlotState expected)
+    {
+        auto info = key_mgmt.GetKeySlotInfo(slot);
+        ASSERT_TRUE(info.has_value()) << "GetKeySlotInfo failed";
+        EXPECT_EQ(info.value().state, expected);
+    }
+
     /// HMAC-SHA256 of @p data with @p key, via a single Init/Update/Finalize.
-    std::vector<std::uint8_t> ComputeMac(const CryptoResourceId& key, const std::vector<std::uint8_t>& data)
+    std::vector<std::uint8_t> ComputeMac(const CryptoResourceId& key,
+                                         const std::vector<std::uint8_t>& data,
+                                         ProviderType provider = ProviderType::kSoftware)
     {
         MacContextConfig mac_config;
-        mac_config.SetAlgorithm(std::string{kMacAlgorithm}).SetKey(key).SetProviderType(ProviderType::kSoftware);
+        mac_config.SetAlgorithm(std::string{kMacAlgorithm}).SetKey(key).SetProviderType(provider);
         auto mac = ctx_->CreateMacContext(mac_config);
         EXPECT_TRUE(mac.has_value()) << "Failed to create MAC context";
         if (!mac.has_value())
@@ -147,6 +159,7 @@ TEST_F(KeySlotStoreTest, ImportKeyIntoSlot_MacMatchesKnownAnswer)
         .SetAlgorithm(std::string{kSlotAlgorithm});
     auto stored = key_mgmt_->ImportKey(slot, params);
     ASSERT_TRUE(stored.has_value()) << "ImportKey into slot failed: " << stored.error().Message();
+    ExpectSlotState(*key_mgmt_, slot, KeySlotState::kOccupied);
 
     auto key = key_mgmt_->LoadKey(slot);
     ASSERT_TRUE(key.has_value()) << "LoadKey from stored slot failed";
@@ -169,6 +182,7 @@ TEST_F(KeySlotStoreTest, ImportKeyIntoSlot_MacMatchesKnownAnswer)
 TEST_F(KeySlotStoreTest, GenerateKeyIntoSlot_KeyLoadsAndIsStable)
 {
     const auto slot = ResolveSlot(kGenerateSlot);
+    ExpectSlotState(*key_mgmt_, slot, KeySlotState::kEmpty);
 
     GenerateKeyParams wrong;
     wrong.SetAlgorithm("AES-128");
@@ -181,6 +195,7 @@ TEST_F(KeySlotStoreTest, GenerateKeyIntoSlot_KeyLoadsAndIsStable)
     params.SetAlgorithm(std::string{kSlotAlgorithm});
     auto stored = key_mgmt_->GenerateKey(slot, std::nullopt, params);
     ASSERT_TRUE(stored.has_value()) << "GenerateKey into slot failed: " << stored.error().Message();
+    ExpectSlotState(*key_mgmt_, slot, KeySlotState::kOccupied);
 
     // Two loads of the slot yield the same key material.
     auto first = key_mgmt_->LoadKey(slot);
@@ -204,6 +219,7 @@ TEST_F(KeySlotStoreTest, PersistKey_SlotKeyMatchesEphemeralKey)
 
     auto persisted = key_mgmt_->PersistKey(slot, ephemeral.value());
     ASSERT_TRUE(persisted.has_value()) << "PersistKey failed: " << persisted.error().Message();
+    ExpectSlotState(*key_mgmt_, slot, KeySlotState::kOccupied);
 
     // The ephemeral key is still usable and the slot holds the same material.
     const auto ephemeral_mac = ComputeMac(ephemeral.value(), input_);
@@ -226,6 +242,8 @@ TEST_F(KeySlotStoreTest, GenerateKeyPairIntoSlots_PublicSlotVerifiesPrivateSlotS
     params.SetAlgorithm(std::string{kKeyPairAlgorithm});
     auto stored = key_mgmt_->GenerateKey(private_slot, public_slot, params);
     ASSERT_TRUE(stored.has_value()) << "GenerateKey into key pair slots failed: " << stored.error().Message();
+    ExpectSlotState(*key_mgmt_, private_slot, KeySlotState::kOccupied);
+    ExpectSlotState(*key_mgmt_, public_slot, KeySlotState::kOccupied);
 
     auto private_key = key_mgmt_->LoadKey(private_slot);
     ASSERT_TRUE(private_key.has_value()) << "LoadKey from private slot failed";
@@ -254,6 +272,117 @@ TEST_F(KeySlotStoreTest, GenerateKeyPairIntoSlots_PublicSlotVerifiesPrivateSlotS
     EXPECT_EQ(*again.error(), static_cast<score::result::ErrorCode>(CryptoErrorCode::kKeySlotOccupied))
         << again.error().Message();
 }
+
+#ifdef SCORE_CRYPTO_HARDWARE_BACKEND_ENABLED
+constexpr std::string_view kPkcs11SlotAlgorithm = "HMAC-SHA256";
+constexpr std::string_view kPkcs11GenerateSlot = "Store_Generate_PKCS11";
+constexpr std::string_view kPkcs11ImportSlot = "Store_Import_PKCS11";
+constexpr std::string_view kPkcs11PersistSlot = "Store_Persist_PKCS11";
+
+/// The same flows against slots of the PKCS#11 provider (SoftHSM), whose keys
+/// are stored as token objects named by the slot's pkcs11.label.
+class Pkcs11KeySlotStoreTest : public KeySlotStoreTest
+{
+  protected:
+    void SetUp() override
+    {
+        KeySlotStoreTest::SetUp();
+        if (HasFatalFailure())
+        {
+            return;
+        }
+        KeyManagementContextConfig config;
+        config.SetProviderType(ProviderType::kHardware);
+        auto key_mgmt = ctx_->CreateKeyManagementContext(config);
+        ASSERT_TRUE(key_mgmt.has_value()) << "Failed to create PKCS#11 key management context";
+        hw_key_mgmt_ = std::move(key_mgmt.value());
+    }
+
+    std::unique_ptr<IKeyManagementContext> hw_key_mgmt_;
+};
+
+TEST_F(Pkcs11KeySlotStoreTest, ImportKeyIntoSlot_MacMatchesKnownAnswer)
+{
+    const auto key_bytes = read_bin(GetTestVectorPath("/mac/key_aes_256.key"));
+    const auto expected_mac = read_bin(GetTestVectorPath("/mac/hmac_sha256_hello_world.bin"));
+    ASSERT_FALSE(key_bytes.empty());
+    const auto slot = ResolveSlot(kPkcs11ImportSlot);
+
+    ImportKeyParams params;
+    params.SetKeyData(key_bytes.data(), key_bytes.size())
+        .SetFormat(FormatType::kRaw)
+        .SetAlgorithm(std::string{kPkcs11SlotAlgorithm});
+    auto stored = hw_key_mgmt_->ImportKey(slot, params);
+    ASSERT_TRUE(stored.has_value()) << "ImportKey into PKCS#11 slot failed: " << stored.error().Message();
+    ExpectSlotState(*hw_key_mgmt_, slot, KeySlotState::kOccupied);
+
+    auto key = hw_key_mgmt_->LoadKey(slot);
+    ASSERT_TRUE(key.has_value()) << "LoadKey from stored PKCS#11 slot failed";
+    EXPECT_EQ(ComputeMac(key.value(), input_, ProviderType::kHardware), expected_mac);
+
+    auto again = hw_key_mgmt_->ImportKey(slot, params);
+    ASSERT_FALSE(again.has_value());
+    EXPECT_EQ(*again.error(), static_cast<score::result::ErrorCode>(CryptoErrorCode::kKeySlotOccupied))
+        << again.error().Message();
+}
+
+TEST_F(Pkcs11KeySlotStoreTest, GenerateKeyIntoSlot_KeyLoadsAndIsStable)
+{
+    const auto slot = ResolveSlot(kPkcs11GenerateSlot);
+
+    GenerateKeyParams params;
+    params.SetAlgorithm(std::string{kPkcs11SlotAlgorithm});
+    auto stored = hw_key_mgmt_->GenerateKey(slot, std::nullopt, params);
+    ASSERT_TRUE(stored.has_value()) << "GenerateKey into PKCS#11 slot failed: " << stored.error().Message();
+    ExpectSlotState(*hw_key_mgmt_, slot, KeySlotState::kOccupied);
+
+    auto first = hw_key_mgmt_->LoadKey(slot);
+    ASSERT_TRUE(first.has_value());
+    const auto mac_first = ComputeMac(first.value(), input_, ProviderType::kHardware);
+    static_cast<void>(first.value().Release());
+
+    auto second = hw_key_mgmt_->LoadKey(slot);
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(ComputeMac(second.value(), input_, ProviderType::kHardware), mac_first);
+
+    auto again = hw_key_mgmt_->GenerateKey(slot, std::nullopt, params);
+    ASSERT_FALSE(again.has_value());
+    EXPECT_EQ(*again.error(), static_cast<score::result::ErrorCode>(CryptoErrorCode::kKeySlotOccupied))
+        << again.error().Message();
+}
+
+TEST_F(Pkcs11KeySlotStoreTest, PersistKey_SlotKeyMatchesSessionKey)
+{
+    const auto slot = ResolveSlot(kPkcs11PersistSlot);
+
+    GenerateKeyParams params;
+    params.SetAlgorithm(std::string{kPkcs11SlotAlgorithm}).SetPermissions(KeyOperationPermission::kMac);
+
+    // An OpenSSL key would have to enter the token as plaintext.
+    auto software_key = key_mgmt_->GenerateKey(params);
+    ASSERT_TRUE(software_key.has_value());
+    auto foreign = hw_key_mgmt_->PersistKey(slot, software_key.value());
+    ASSERT_FALSE(foreign.has_value());
+    EXPECT_EQ(*foreign.error(), static_cast<score::result::ErrorCode>(CryptoErrorCode::kKeyNotExportable))
+        << foreign.error().Message();
+
+    auto session_key = hw_key_mgmt_->GenerateKey(params);
+    ASSERT_TRUE(session_key.has_value()) << "GenerateKey on PKCS#11 failed";
+    auto persisted = hw_key_mgmt_->PersistKey(slot, session_key.value());
+    ASSERT_TRUE(persisted.has_value()) << "PersistKey into PKCS#11 slot failed: " << persisted.error().Message();
+    ExpectSlotState(*hw_key_mgmt_, slot, KeySlotState::kOccupied);
+
+    const auto session_mac = ComputeMac(session_key.value(), input_, ProviderType::kHardware);
+    auto loaded = hw_key_mgmt_->LoadKey(slot);
+    ASSERT_TRUE(loaded.has_value()) << "LoadKey from persisted PKCS#11 slot failed";
+    EXPECT_EQ(ComputeMac(loaded.value(), input_, ProviderType::kHardware), session_mac);
+
+    auto again = hw_key_mgmt_->PersistKey(slot, session_key.value());
+    ASSERT_FALSE(again.has_value());
+    EXPECT_EQ(*again.error(), static_cast<score::result::ErrorCode>(CryptoErrorCode::kKeySlotOccupied))
+        << again.error().Message();
+}
+#endif  // SCORE_CRYPTO_HARDWARE_BACKEND_ENABLED
 
 }  // namespace
 

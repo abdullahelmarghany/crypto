@@ -594,6 +594,285 @@ TEST_F(Pkcs11KeyClearTest, MixedCaseHexId_MatchesOnlyTheObjectWithThatId)
     EXPECT_EQ(SlotState(upper_node), static_cast<std::uint64_t>(score::crypto::KeySlotState::kEmpty));
 }
 
+// ===========================================================================
+// Storing keys into slots (KEY_IMPORT_TO_SLOT / KEY_GENERATE_TO_SLOT / KEY_PERSIST)
+// ===========================================================================
+class Pkcs11StoreToSlotTest : public Pkcs11KeyHandlerTest
+{
+  protected:
+    /// Register an empty HMAC-SHA256 slot naming token object @p label.
+    dm::DataNodeId AddStoreSlot(
+        const std::string& label,
+        score::crypto::KeyOperationPermission allowed = score::crypto::KeyOperationPermission::kMac)
+    {
+        const std::string deploy_path = std::filesystem::temp_directory_path().string() + "/test_pkcs11_store_" +
+                                        (label.empty() ? std::string{"nolabel"} : label) + ".kv";
+        {
+            std::ofstream f(deploy_path);
+            f << "[metadata]\navailability=active\n[key]\n"
+              << std::string{km::deployment_keys::kPkcs11Label} << "=" << label << "\n";
+        }
+        km::KeySlotConfig slot{};
+        slot.slot_name = "store/" + (label.empty() ? std::string{"nolabel"} : label);
+        slot.algorithm = "HMAC-SHA256";
+        slot.provider_names = {"SOFTHSM_TEST"};
+        slot.provider_ids = {1};
+        slot.allowed_operations = allowed;
+        slot.access_policy.allowed_uids.push_back(kUid);
+        slot.access_policy.allowed_write_uids.push_back(kUid);
+        slot.deployment_path = deploy_path;
+        slot.deployment_format = "kv";
+        return RegisterSlotNode(slot);
+    }
+
+    score::crypto::Expected<common::ResponseParameters, common::DaemonErrorCode> Exec(std::uint16_t op,
+                                                                                      common::RequestParameters params)
+    {
+        return m_km_handler->Execute({score::crypto::daemon::common::actors::OP_ACTOR_KEY_MANAGEMENT, op}, params);
+    }
+
+    score::crypto::Expected<common::ResponseParameters, common::DaemonErrorCode> ImportToSlot(dm::DataNodeId slot)
+    {
+        common::RequestParameters params;
+        params.push_back(static_cast<std::uint64_t>(slot));
+        params.push_back(std::string_view("HMAC-SHA256"));
+        params.push_back(static_cast<std::uint32_t>(score::crypto::KeyOperationPermission::kMac));
+        params.push_back(static_cast<std::uint32_t>(score::crypto::FormatType::kRaw));
+        params.push_back(score::cpp::span<const std::uint8_t>{m_key.data(), m_key.size()});
+        return Exec(km::operations::KEY_IMPORT_TO_SLOT, std::move(params));
+    }
+
+    score::crypto::Expected<common::ResponseParameters, common::DaemonErrorCode> GenerateToSlot(dm::DataNodeId slot)
+    {
+        common::RequestParameters params;
+        params.push_back(static_cast<std::uint64_t>(slot));
+        params.push_back(static_cast<std::uint64_t>(0U));
+        params.push_back(std::string_view("HMAC-SHA256"));
+        return Exec(km::operations::KEY_GENERATE_TO_SLOT, std::move(params));
+    }
+
+    std::uint64_t GenerateSessionKey(
+        score::crypto::KeyOperationPermission perms = score::crypto::KeyOperationPermission::kMac)
+    {
+        common::RequestParameters params;
+        params.push_back(std::string_view("HMAC-SHA256"));
+        params.push_back(static_cast<std::uint32_t>(perms));
+        auto res = Exec(km::operations::KEY_GENERATE, std::move(params));
+        return res.has_value() ? std::get<std::uint64_t>(res.value()[0]) : 0U;
+    }
+
+    score::crypto::Expected<common::ResponseParameters, common::DaemonErrorCode> Persist(dm::DataNodeId slot,
+                                                                                         std::uint64_t key)
+    {
+        common::RequestParameters params;
+        params.push_back(static_cast<std::uint64_t>(slot));
+        params.push_back(key);
+        return Exec(km::operations::KEY_PERSIST, std::move(params));
+    }
+
+    bool LoadSlot(dm::DataNodeId slot)
+    {
+        common::RequestParameters params;
+        params.push_back(static_cast<std::uint64_t>(slot));
+        auto res = Exec(km::operations::KEY_LOAD, std::move(params));
+        return res.has_value() && (std::get<std::uint64_t>(res.value()[0]) != 0U);
+    }
+
+    /// Token objects carrying @p label, as seen by the fixture's own session.
+    std::vector<CK_OBJECT_HANDLE> FindTokenObjects(const std::string& label)
+    {
+        CK_BBOOL token = CK_TRUE;
+        CK_ATTRIBUTE tmpl[] = {
+            {CKA_TOKEN, &token, sizeof(token)},
+            {CKA_LABEL, const_cast<char*>(label.data()), static_cast<CK_ULONG>(label.size())},
+        };
+        std::vector<CK_OBJECT_HANDLE> found;
+        // Private objects are only visible logged in, and the provider's
+        // session pool may have logged the application out.
+        CK_UTF8CHAR pin[] = {'1', '2', '3', '4'};
+        static_cast<void>(function_list->C_Login(session, CKU_USER, pin, sizeof(pin)));
+        if (function_list->C_FindObjectsInit(session, tmpl, 2U) != CKR_OK)
+        {
+            return found;
+        }
+        CK_OBJECT_HANDLE objects[4]{};
+        CK_ULONG count = 0U;
+        if (function_list->C_FindObjects(session, objects, 4U, &count) == CKR_OK)
+        {
+            found.assign(objects, objects + count);
+        }
+        static_cast<void>(function_list->C_FindObjectsFinal(session));
+        return found;
+    }
+
+    CK_BBOOL BoolAttribute(CK_OBJECT_HANDLE object, CK_ATTRIBUTE_TYPE type)
+    {
+        CK_BBOOL value = CK_FALSE;
+        CK_ATTRIBUTE attr{type, &value, sizeof(value)};
+        EXPECT_EQ(function_list->C_GetAttributeValue(session, object, &attr, 1U), static_cast<CK_RV>(CKR_OK));
+        return value;
+    }
+
+    // The uid is the upper half of a ClientId (see GetUidFromClientId).
+    static constexpr std::uint32_t kUid = static_cast<std::uint32_t>(kClient >> 32U);
+    const std::vector<std::uint8_t> m_key = std::vector<std::uint8_t>(32U, 0x3CU);
+};
+
+TEST_F(Pkcs11StoreToSlotTest, ImportToSlot_CreatesTokenObjectWithSlotPolicy)
+{
+    const auto slot = AddStoreSlot("store_import");
+    ASSERT_NE(slot, 0U);
+    ASSERT_FALSE(LoadSlot(slot));
+
+    auto result = ImportToSlot(slot);
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+
+    const auto objects = FindTokenObjects("store_import");
+    ASSERT_EQ(objects.size(), 1U);
+    EXPECT_EQ(BoolAttribute(objects[0], CKA_TOKEN), CK_TRUE);
+    EXPECT_EQ(BoolAttribute(objects[0], CKA_SENSITIVE), CK_TRUE);
+    EXPECT_EQ(BoolAttribute(objects[0], CKA_EXTRACTABLE), CK_FALSE);
+    EXPECT_EQ(BoolAttribute(objects[0], CKA_SIGN), CK_TRUE);
+    EXPECT_EQ(BoolAttribute(objects[0], CKA_ENCRYPT), CK_FALSE);
+    EXPECT_TRUE(LoadSlot(slot));
+}
+
+TEST_F(Pkcs11StoreToSlotTest, ExportableSlot_StoresExtractableKey)
+{
+    const auto slot = AddStoreSlot(
+        "store_export", score::crypto::KeyOperationPermission::kMac | score::crypto::KeyOperationPermission::kExport);
+    ASSERT_TRUE(ImportToSlot(slot).has_value());
+
+    const auto objects = FindTokenObjects("store_export");
+    ASSERT_EQ(objects.size(), 1U);
+    EXPECT_EQ(BoolAttribute(objects[0], CKA_EXTRACTABLE), CK_TRUE);
+    EXPECT_EQ(BoolAttribute(objects[0], CKA_SENSITIVE), CK_TRUE);
+}
+
+TEST_F(Pkcs11StoreToSlotTest, GenerateToSlot_CreatesTokenObjectAndSlotLoads)
+{
+    const auto slot = AddStoreSlot("store_generate");
+    ASSERT_NE(slot, 0U);
+
+    auto result = GenerateToSlot(slot);
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+
+    const auto objects = FindTokenObjects("store_generate");
+    ASSERT_EQ(objects.size(), 1U);
+    EXPECT_EQ(BoolAttribute(objects[0], CKA_TOKEN), CK_TRUE);
+    EXPECT_TRUE(LoadSlot(slot));
+}
+
+TEST_F(Pkcs11StoreToSlotTest, StoreIntoOccupiedSlot_IsRefused)
+{
+    const auto slot = AddStoreSlot("store_occupied");
+    ASSERT_NE(CreateTokenKey(std::vector<uint8_t>(32U, 0x11U), "store_occupied"),
+              static_cast<CK_OBJECT_HANDLE>(CK_INVALID_HANDLE));
+
+    auto imported = ImportToSlot(slot);
+    ASSERT_FALSE(imported.has_value());
+    EXPECT_EQ(imported.error(), common::DaemonErrorCode::kKeySlotOccupied);
+
+    auto generated = GenerateToSlot(slot);
+    ASSERT_FALSE(generated.has_value());
+    EXPECT_EQ(generated.error(), common::DaemonErrorCode::kKeySlotOccupied);
+
+    const auto key = GenerateSessionKey();
+    ASSERT_NE(key, 0U);
+    auto persisted = Persist(slot, key);
+    ASSERT_FALSE(persisted.has_value());
+    EXPECT_EQ(persisted.error(), common::DaemonErrorCode::kKeySlotOccupied);
+
+    EXPECT_EQ(FindTokenObjects("store_occupied").size(), 1U);
+}
+
+TEST_F(Pkcs11StoreToSlotTest, SlotWithoutLabel_IsInvalidArgument)
+{
+    const auto slot = AddStoreSlot("");
+    ASSERT_NE(slot, 0U);
+
+    auto result = ImportToSlot(slot);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), common::DaemonErrorCode::kInvalidArgument);
+}
+
+TEST_F(Pkcs11StoreToSlotTest, Persist_CopiesSessionKeyToTokenAndSourceStaysUsable)
+{
+    const auto first = AddStoreSlot("store_persist_a");
+    const auto second = AddStoreSlot("store_persist_b");
+    const auto key = GenerateSessionKey();
+    ASSERT_NE(key, 0U);
+
+    auto result = Persist(first, key);
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    const auto objects = FindTokenObjects("store_persist_a");
+    ASSERT_EQ(objects.size(), 1U);
+    EXPECT_EQ(BoolAttribute(objects[0], CKA_TOKEN), CK_TRUE);
+    EXPECT_EQ(BoolAttribute(objects[0], CKA_EXTRACTABLE), CK_FALSE);
+    EXPECT_TRUE(LoadSlot(first));
+
+    // The volatile source is still resolvable after the copy.
+    ASSERT_TRUE(Persist(second, key).has_value());
+    EXPECT_EQ(FindTokenObjects("store_persist_b").size(), 1U);
+}
+
+TEST_F(Pkcs11StoreToSlotTest, Persist_ExtractableSessionKeyIntoNonExportSlot_ClearsExtractable)
+{
+    const auto slot = AddStoreSlot("store_persist_export");
+    const auto key = GenerateSessionKey(score::crypto::KeyOperationPermission::kMac |
+                                        score::crypto::KeyOperationPermission::kExport);
+    ASSERT_NE(key, 0U);
+
+    auto result = Persist(slot, key);
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    const auto objects = FindTokenObjects("store_persist_export");
+    ASSERT_EQ(objects.size(), 1U);
+    EXPECT_EQ(BoolAttribute(objects[0], CKA_EXTRACTABLE), CK_FALSE);
+    EXPECT_EQ(BoolAttribute(objects[0], CKA_SENSITIVE), CK_TRUE);
+}
+
+namespace
+{
+class ForeignKeyHandler final : public km::IKeyHandler
+{
+  public:
+    const km::ProviderKeyHandle& GetHandle() const noexcept override
+    {
+        return m_handle;
+    }
+    common::ProviderId GetProviderId() const noexcept override
+    {
+        return 0U;
+    }
+    score::crypto::Expected<std::monostate, common::DaemonErrorCode> Release() override
+    {
+        return std::monostate{};
+    }
+    score::crypto::Expected<km::SecureKeyBytes, common::DaemonErrorCode> Export() const override
+    {
+        return score::crypto::make_unexpected(common::DaemonErrorCode::kKeyOperationNotPermitted);
+    }
+
+  private:
+    km::ProviderKeyHandle m_handle{};
+};
+}  // namespace
+
+TEST_F(Pkcs11StoreToSlotTest, StoreKeyOfAnotherProvider_IsNotExportable)
+{
+    km::KeySlotConfig slot{};
+    slot.slot_name = "store/foreign";
+    slot.algorithm = "HMAC-SHA256";
+    slot.provider_ids = {1};
+    auto slot_handler = m_provider->GetKeySlotHandler(slot);
+    ASSERT_NE(slot_handler, nullptr);
+
+    ForeignKeyHandler foreign;
+    auto result = slot_handler->StoreKey(slot, foreign);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), common::DaemonErrorCode::kKeyNotExportable);
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point: @googletest//:gtest_main supplies main()
 // ---------------------------------------------------------------------------

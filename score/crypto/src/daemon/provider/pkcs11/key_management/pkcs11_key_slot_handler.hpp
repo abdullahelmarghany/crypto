@@ -75,6 +75,18 @@ class Pkcs11KeySlotHandler final : public key_management::IKeySlotHandler
     [[nodiscard]] score::crypto::Expected<score::crypto::KeySlotInfo, score::crypto::daemon::common::DaemonErrorCode>
     GetSlotInfo(const key_management::KeySlotConfig& slot) override;
 
+    /// Persist a PKCS#11 key into the slot: C_CopyObject with CKA_TOKEN=TRUE,
+    /// the slot's CKA_LABEL / CKA_ID and the usage of slot.allowed_operations.
+    /// The source key stays usable.
+    ///
+    /// @return kKeyNotExportable for a key of another provider (it would have to
+    ///         enter the token as plaintext); kKeySlotOccupied if the token
+    ///         already holds the slot's object; kInvalidArgument if the slot
+    ///         names no usable label / id.
+    [[nodiscard]] score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode> StoreKey(
+        const key_management::KeySlotConfig& slot,
+        key_management::IKeyHandler& handler) override;
+
   private:
     std::shared_ptr<Pkcs11Provider> m_provider;
     std::weak_ptr<Pkcs11Module> m_module;

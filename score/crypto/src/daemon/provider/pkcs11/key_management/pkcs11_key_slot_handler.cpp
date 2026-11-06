@@ -20,90 +20,20 @@
 #include "score/crypto/src/daemon/provider/pkcs11/detail/pkcs11_algorithm_info.hpp"
 #include "score/crypto/src/daemon/provider/pkcs11/key_management/pkcs11_key_handler.hpp"
 #include "score/crypto/src/daemon/provider/pkcs11/key_management/pkcs11_key_store.hpp"
+#include "score/crypto/src/daemon/provider/pkcs11/key_management/pkcs11_slot_object.hpp"
 #include "score/crypto/src/daemon/provider/pkcs11/pkcs11_provider.hpp"
+#include "score/crypto/src/daemon/provider/pkcs11/pkcs11_session_guard.hpp"
 
 #include "score/mw/log/logging.h"
 
 #include <array>
 #include <iterator>
+#include <mutex>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace score::crypto::daemon::provider::pkcs11
 {
-
-namespace
-{
-
-/// Build the token object search template from the slot deployment properties.
-/// At least one of pkcs11.label / pkcs11.object_id must be set and non-empty.
-/// An empty object_id counts as absent; any other object_id must be valid hex,
-/// so a malformed ID cannot silently degrade to a label-only match.
-score::crypto::Expected<SearchTemplate, score::crypto::daemon::common::DaemonErrorCode> BuildSearchTemplate(
-    const std::unordered_map<std::string, std::string>& key_props)
-{
-    using key_management::deployment_keys::kPkcs11Label;
-    using key_management::deployment_keys::kPkcs11ObjectClass;
-    using key_management::deployment_keys::kPkcs11ObjectId;
-
-    SearchTemplate search_tmpl;
-    const auto label_it = key_props.find(std::string{kPkcs11Label});
-    if (label_it != key_props.end())
-    {
-        search_tmpl.label = label_it->second;
-    }
-    const auto id_it = key_props.find(std::string{kPkcs11ObjectId});
-    if ((id_it != key_props.end()) && !id_it->second.empty())
-    {
-        auto id_bytes = detail::TryHexDecode(id_it->second);
-        if (!id_bytes.has_value())
-        {
-            return score::crypto::make_unexpected(score::crypto::daemon::common::DaemonErrorCode::kInvalidArgument);
-        }
-        search_tmpl.id = std::move(id_bytes.value());
-    }
-    if (search_tmpl.label.empty() && search_tmpl.id.empty())
-    {
-        return score::crypto::make_unexpected(score::crypto::daemon::common::DaemonErrorCode::kInvalidArgument);
-    }
-
-    // Object class defaults to CKO_SECRET_KEY.
-    const auto class_it = key_props.find(std::string{kPkcs11ObjectClass});
-    if (class_it != key_props.end())
-    {
-        if (class_it->second == "private_key")
-        {
-            search_tmpl.obj_class = CKO_PRIVATE_KEY;
-        }
-        else if (class_it->second == "public_key")
-        {
-            search_tmpl.obj_class = CKO_PUBLIC_KEY;
-        }
-    }
-    return search_tmpl;
-}
-
-/// Attribute list for C_FindObjectsInit. Points into @p search_tmpl, which must outlive it.
-std::vector<CK_ATTRIBUTE> ToAttributes(SearchTemplate& search_tmpl)
-{
-    std::vector<CK_ATTRIBUTE> attrs;
-    attrs.push_back({CKA_CLASS, &search_tmpl.obj_class, sizeof(search_tmpl.obj_class)});
-    if (!search_tmpl.label.empty())
-    {
-        // MISRA C++:2023 Rule 8.2.3 deviation — PKCS#11 C API (CK_ATTRIBUTE) requires non-const pValue.
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-        attrs.push_back(
-            {CKA_LABEL, const_cast<char*>(search_tmpl.label.data()), static_cast<CK_ULONG>(search_tmpl.label.size())});
-    }
-    if (!search_tmpl.id.empty())
-    {
-        attrs.push_back({CKA_ID, search_tmpl.id.data(), static_cast<CK_ULONG>(search_tmpl.id.size())});
-    }
-    return attrs;
-}
-
-}  // namespace
 
 // =============================================================================
 // Pkcs11KeySlotHandler
@@ -402,6 +332,93 @@ Pkcs11KeySlotHandler::GetSlotInfo(const key_management::KeySlotConfig& slot)
         return score::crypto::make_unexpected(state.error());
     }
     return key_management::detail::BuildKeySlotInfo(slot, state.value());
+}
+
+score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode> Pkcs11KeySlotHandler::StoreKey(
+    const key_management::KeySlotConfig& slot,
+    key_management::IKeyHandler& handler)
+{
+    using Error = score::crypto::daemon::common::DaemonErrorCode;
+
+    // Any other provider's key would have to cross into the token as plaintext.
+    auto* pkcs11_key = dynamic_cast<Pkcs11KeyHandler*>(&handler);
+    if (pkcs11_key == nullptr)
+    {
+        score::mw::log::LogError() << LOG_PREFIX << "StoreKey: slot '" << slot.slot_name
+                                   << "' only takes keys of its own PKCS#11 provider";
+        return score::crypto::make_unexpected(Error::kKeyNotExportable);
+    }
+
+    auto module = m_module.lock();
+    if ((!m_provider) || (!module) || (module->GetFunctionList() == nullptr))
+    {
+        return score::crypto::make_unexpected(Error::kInternalError);
+    }
+    CK_FUNCTION_LIST& fns = *module->GetFunctionList();
+
+    auto name = LoadStorableSearchTemplate(slot);
+    if (!name.has_value())
+    {
+        score::mw::log::LogError() << LOG_PREFIX << "StoreKey: slot '" << slot.slot_name
+                                   << "' has no usable pkcs11.label / pkcs11.object_id";
+        return score::crypto::make_unexpected(name.error());
+    }
+    TokenKeyTemplate tmpl{name.value(), slot.allowed_operations, CKK_GENERIC_SECRET, true};
+
+    const std::lock_guard<std::mutex> lock{SlotStoreMutex()};
+    const Pkcs11HandlerRequirements reqs{Pkcs11SessionType::ReadWrite, Pkcs11TokenAuthState::User};
+    Pkcs11SessionGuard guard(*m_provider, reqs);
+    if (!guard)
+    {
+        return score::crypto::make_unexpected(Error::kProviderBusy);
+    }
+
+    // A session key is only addressable in its creating session, which is
+    // what ResolveObject returns for it; a token key resolves on ours.
+    auto resolved = pkcs11_key->ResolveObject(guard.get());
+    if (!resolved.has_value())
+    {
+        return score::crypto::make_unexpected(resolved.error());
+    }
+    const CK_SESSION_HANDLE session = resolved.value().session();
+
+    auto exists = SlotObjectExists(fns, session, name.value());
+    if (!exists.has_value())
+    {
+        return score::crypto::make_unexpected(exists.error());
+    }
+    if (exists.value())
+    {
+        return score::crypto::make_unexpected(Error::kKeySlotOccupied);
+    }
+
+    CK_OBJECT_HANDLE copy = CK_INVALID_HANDLE;
+    const CK_RV rv = fns.C_CopyObject(session, resolved.value().object(), tmpl.data(), tmpl.size(), &copy);
+    if (rv != CKR_OK)
+    {
+        score::mw::log::LogError() << LOG_PREFIX << "StoreKey: C_CopyObject into slot '" << slot.slot_name
+                                   << "' failed: rv=" << static_cast<unsigned long>(rv);
+        return score::crypto::make_unexpected(Error::kOperationFailed);
+    }
+    // CKA_EXTRACTABLE may only go from TRUE to FALSE and is read-only once
+    // FALSE, so touch it only on a copy that is extractable against the slot.
+    CK_BBOOL extractable_value = CK_FALSE;
+    CK_ATTRIBUTE extractable{CKA_EXTRACTABLE, &extractable_value, sizeof(extractable_value)};
+    CK_RV attr_rv = fns.C_GetAttributeValue(session, copy, &extractable, 1U);
+    if ((attr_rv == CKR_OK) && (extractable_value == CK_TRUE) &&
+        (!score::crypto::HasPermission(slot.allowed_operations, score::crypto::KeyOperationPermission::kExport)))
+    {
+        extractable_value = CK_FALSE;
+        attr_rv = fns.C_SetAttributeValue(session, copy, &extractable, 1U);
+    }
+    if (attr_rv != CKR_OK)
+    {
+        score::mw::log::LogError() << LOG_PREFIX << "StoreKey: restricting CKA_EXTRACTABLE in slot '" << slot.slot_name
+                                   << "' failed: rv=" << static_cast<unsigned long>(attr_rv);
+        static_cast<void>(fns.C_DestroyObject(session, copy));
+        return score::crypto::make_unexpected(Error::kOperationFailed);
+    }
+    return std::monostate{};
 }
 
 }  // namespace score::crypto::daemon::provider::pkcs11

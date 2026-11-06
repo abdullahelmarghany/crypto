@@ -81,7 +81,30 @@ class Pkcs11KeyFactory : public key_management::IKeyFactory
         const key_management::ProviderKeyHandle& handle,
         std::optional<score::crypto::FormatType> format) override;
 
+    /// Generate the key directly as the slot's token object (CKA_TOKEN=TRUE,
+    /// the slot's CKA_LABEL / CKA_ID, usage from slot.allowed_operations).
+    ///
+    /// The key never exists as a session object, so @p slot_handler is unused.
+    /// @return kKeySlotOccupied if the token already holds the slot's object;
+    ///         kInvalidArgument if the slot names no usable label / id.
+    [[nodiscard]] score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode>
+    GenerateKeyToSlot(const key_management::KeySlotConfig& slot,
+                      const key_management::KeyGenerationRequest& request,
+                      key_management::IKeySlotHandler& slot_handler) override;
+
+    /// Import the key directly as the slot's token object; see GenerateKeyToSlot().
+    [[nodiscard]] score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode>
+    ImportKeyToSlot(const key_management::KeySlotConfig& slot,
+                    const key_management::KeyImportRequest& request,
+                    key_management::IKeySlotHandler& slot_handler) override;
+
   private:
+    /// Generate (@p import == nullptr) or import a token key into @p slot.
+    [[nodiscard]] score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode>
+    CreateTokenKey(const key_management::KeySlotConfig& slot,
+                   const ::score::crypto::AlgorithmDescriptor& algorithm,
+                   const key_management::KeyImportRequest* import);
+
     std::weak_ptr<Pkcs11Provider> m_provider;
     std::weak_ptr<Pkcs11Module> m_module;
     std::shared_ptr<Pkcs11KeyStore> m_key_store;

@@ -101,6 +101,41 @@ score::crypto::Expected<std::monostate, DaemonErrorCode> WriteFile(const std::st
     return std::monostate{};
 }
 
+score::crypto::Expected<std::monostate, DaemonErrorCode> WriteNewPrivateFile(
+    const std::string& path,
+    score::crypto::span<const std::uint8_t> data)
+{
+    if (path.empty() || data.empty())
+        return score::crypto::make_unexpected(DaemonErrorCode::kInvalidArgument);
+
+    const score::filesystem::Path target_path{path};
+    score::filesystem::StandardFilesystem fs{};
+    const auto parent = target_path.ParentPath();
+    if (!parent.Empty())
+    {
+        if (!fs.CreateDirectories(parent).has_value())
+            return score::crypto::make_unexpected(DaemonErrorCode::kInternalError);
+    }
+
+    // kExclusive also refuses a dangling symlink planted at the target path.
+    using Open = score::os::Fcntl::Open;
+    using Mode = score::os::Stat::Mode;
+    const auto created =
+        score::os::Fcntl::instance().open(path.c_str(),
+                                          Open::kWriteOnly | Open::kCreate | Open::kExclusive | Open::kCloseOnExec,
+                                          Mode::kReadUser | Mode::kWriteUser);
+    if (!created.has_value())
+        return score::crypto::make_unexpected(created.error().GetOsDependentErrorCode() == EEXIST
+                                                  ? DaemonErrorCode::kResourceBusy
+                                                  : DaemonErrorCode::kPersistFailed);
+    static_cast<void>(score::os::Unistd::instance().close(created.value()));
+
+    auto write_result = WriteFile(path, data);
+    if (!write_result.has_value())
+        static_cast<void>(RemoveFile(path));
+    return write_result;
+}
+
 score::crypto::Expected<bool, DaemonErrorCode> FileExists(const std::string& path)
 {
     if (path.empty())

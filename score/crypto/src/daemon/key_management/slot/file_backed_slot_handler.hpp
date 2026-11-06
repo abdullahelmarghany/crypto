@@ -14,6 +14,7 @@
 #ifndef SCORE_CRYPTO_SRC_DAEMON_KEY_MANAGEMENT_SLOT_FILE_BACKED_SLOT_HANDLER_HPP
 #define SCORE_CRYPTO_SRC_DAEMON_KEY_MANAGEMENT_SLOT_FILE_BACKED_SLOT_HANDLER_HPP
 
+#include "score/crypto/src/daemon/common/storage/file_io.hpp"
 #include "score/crypto/src/daemon/key_management/interfaces/i_key_factory.hpp"
 #include "score/crypto/src/daemon/key_management/interfaces/i_key_slot_handler.hpp"
 
@@ -29,6 +30,9 @@ namespace score::crypto::daemon::key_management
 /// The local read buffer is securely zeroized immediately after the provider
 /// has internalized the material, even on failure.
 ///
+/// StoreKey() writes the material back in the form LoadKey() reads, so a stored
+/// key reloads with the slot's allowed_operations, as any deployed key does.
+///
 /// Support for encrypted-at-rest files is reserved for future extension.
 ///
 /// One FileBackedSlotHandler is shared across all slots that use the same
@@ -38,7 +42,9 @@ class FileBackedSlotHandler final : public IKeySlotHandler
 {
   public:
     /// @param factory  Provider key factory used for ImportKey.
-    explicit FileBackedSlotHandler(IKeyFactory::Sptr factory);
+    /// @param writer   Creates the key file in StoreKey(); replaceable for tests.
+    explicit FileBackedSlotHandler(IKeyFactory::Sptr factory,
+                                   common::storage::FileWriter writer = common::storage::WriteNewPrivateFile);
 
     ~FileBackedSlotHandler() override = default;
 
@@ -59,6 +65,20 @@ class FileBackedSlotHandler final : public IKeySlotHandler
     [[nodiscard]] score::crypto::Expected<IKeyHandler::Sptr, score::crypto::daemon::common::DaemonErrorCode> LoadKey(
         const KeySlotConfig& slot) override;
 
+    /// Persist @p handler's key into the empty slot's key file.
+    ///
+    /// Serialises the key with IKeyHandler::SerializeForStorage() (raw bytes for
+    /// symmetric keys, DER for asymmetric keys) and creates key_properties[kKeyPath]
+    /// with mode 0600 through an atomic write. An existing key file is never
+    /// replaced. The serialised buffer is zeroized before returning.
+    ///
+    /// @return kKeySlotOccupied if the key file already exists; kInvalidArgument
+    ///         if the descriptor names no key path; otherwise the load, serialise
+    ///         or write error.
+    [[nodiscard]] score::crypto::Expected<std::monostate, score::crypto::daemon::common::DaemonErrorCode> StoreKey(
+        const KeySlotConfig& slot,
+        IKeyHandler& handler) override;
+
     /// Return kOccupied if the key file exists, kEmpty otherwise.
     [[nodiscard]] score::crypto::Expected<score::crypto::KeySlotState, score::crypto::daemon::common::DaemonErrorCode>
     GetSlotState(const KeySlotConfig& slot) override;
@@ -78,6 +98,7 @@ class FileBackedSlotHandler final : public IKeySlotHandler
 
   private:
     IKeyFactory::Sptr m_factory;
+    common::storage::FileWriter m_write_file;
 
     /// Maximum accepted key file size (8 KiB).
     static constexpr std::size_t kMaxKeyFileSize = 8U * 1024U;

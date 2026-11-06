@@ -51,7 +51,10 @@ score::crypto::Expected<std::optional<::score::crypto::FormatType>, Error> Resol
 }
 }  // namespace
 
-FileBackedSlotHandler::FileBackedSlotHandler(IKeyFactory::Sptr factory) : m_factory{std::move(factory)} {}
+FileBackedSlotHandler::FileBackedSlotHandler(IKeyFactory::Sptr factory, file_io::FileWriter writer)
+    : m_factory{std::move(factory)}, m_write_file{std::move(writer)}
+{
+}
 
 score::crypto::Expected<IKeyHandler::Sptr, Error> FileBackedSlotHandler::LoadKey(const KeySlotConfig& slot)
 {
@@ -98,6 +101,47 @@ score::crypto::Expected<IKeyHandler::Sptr, Error> FileBackedSlotHandler::LoadKey
     auto import_result = m_factory->ImportKey(req);
     common::SecureZeroizeAndClear(buffer);
     return import_result;
+}
+
+score::crypto::Expected<std::monostate, Error> FileBackedSlotHandler::StoreKey(const KeySlotConfig& slot,
+                                                                               IKeyHandler& handler)
+{
+    auto deploy_result = DeploymentLoader::Load(slot.deployment_path, slot.deployment_format);
+    if (!deploy_result.has_value())
+        return score::crypto::make_unexpected(deploy_result.error());
+
+    const auto& deploy_info = deploy_result.value();
+    const auto path_it = deploy_info.key_properties.find(std::string{deployment_keys::kKeyPath});
+    if (path_it == deploy_info.key_properties.end() || path_it->second.empty())
+        return score::crypto::make_unexpected(Error::kInvalidArgument);
+    const auto& key_path = path_it->second;
+
+    const auto exists = file_io::FileExists(key_path);
+    if (!exists.has_value())
+        return score::crypto::make_unexpected(exists.error());
+    if (exists.value())
+        return score::crypto::make_unexpected(Error::kKeySlotOccupied);
+
+    auto serialised = handler.SerializeForStorage();
+    if (!serialised.has_value())
+        return score::crypto::make_unexpected(serialised.error());
+    auto& bytes = serialised.value().bytes;
+    if (bytes.empty() || bytes.size() > kMaxKeyFileSize)
+    {
+        common::SecureZeroizeAndClear(bytes);
+        return score::crypto::make_unexpected(Error::kPersistFailed);
+    }
+
+    auto write_result = m_write_file(key_path, {bytes.data(), bytes.size()});
+    common::SecureZeroizeAndClear(bytes);
+    if (!write_result.has_value())
+    {
+        // The writer refuses an existing path, so losing a race to another store
+        // reads as an occupied slot.
+        return score::crypto::make_unexpected(write_result.error() == Error::kResourceBusy ? Error::kKeySlotOccupied
+                                                                                           : write_result.error());
+    }
+    return std::monostate{};
 }
 
 score::crypto::Expected<score::crypto::KeySlotState, Error> FileBackedSlotHandler::GetSlotState(

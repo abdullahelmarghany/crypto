@@ -85,6 +85,13 @@ class OpenSslKeyHandler final : public key_management::IKeyHandler
                                             ::score::crypto::daemon::common::DaemonErrorCode>
     Export() const override;
 
+    /// Symmetric keys: the raw key bytes. Asymmetric keys: DER PKCS#8 for a key
+    /// pair, DER SubjectPublicKeyInfo for a public-only key. Both are what
+    /// OpenSslKeyFactory::ImportKey accepts.
+    [[nodiscard]] ::score::crypto::Expected<key_management::SecureKeyBytes,
+                                            ::score::crypto::daemon::common::DaemonErrorCode>
+    SerializeForStorage() const override;
+
     [[nodiscard]] common::ProviderId GetProviderId() const noexcept override;
 
     /// Direct access to managed symmetric key material without opaque_id round-trip.

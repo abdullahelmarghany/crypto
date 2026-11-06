@@ -392,5 +392,42 @@ TEST_F(SecureEraseFileOsTest, OpenPermissionErrorIsAccessDenied)
     EXPECT_EQ(result.error(), DaemonErrorCode::kAccessDenied);
 }
 
+TEST(FileIoTest, NewPrivateFileIsOwnerOnlyAndReadable)
+{
+    const auto path = TestPath("private") / "nested" / "key.bin";
+    const std::vector<std::uint8_t> data{0x01U, 0x02U, 0x03U};
+
+    const auto result = WriteNewPrivateFile(path.string(), {data.data(), data.size()});
+
+    ASSERT_TRUE(result.has_value());
+    const auto perms = std::filesystem::status(path).permissions();
+    EXPECT_EQ(perms & std::filesystem::perms::all,
+              std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+    const auto read = ReadFile(path.string(), 1024U);
+    ASSERT_TRUE(read.has_value());
+    EXPECT_EQ(read.value(), data);
+    std::filesystem::remove_all(path.parent_path().parent_path());
+}
+
+TEST(FileIoTest, NewPrivateFileRefusesExistingFile)
+{
+    const auto path = TestPath("private_existing");
+    {
+        std::ofstream output{path};
+        ASSERT_TRUE(output.is_open());
+        output << "old";
+    }
+    const std::vector<std::uint8_t> data{0xAAU};
+
+    const auto result = WriteNewPrivateFile(path.string(), {data.data(), data.size()});
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), DaemonErrorCode::kResourceBusy);
+    const auto read = ReadFile(path.string(), 1024U);
+    ASSERT_TRUE(read.has_value());
+    EXPECT_EQ(read.value(), (std::vector<std::uint8_t>{'o', 'l', 'd'}));
+    std::filesystem::remove(path);
+}
+
 }  // namespace
 }  // namespace score::crypto::daemon::common::storage

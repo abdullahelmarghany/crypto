@@ -14,7 +14,9 @@
 #include "score/crypto/src/daemon/provider/score_provider/openssl/key_management/openssl_key_handler.hpp"
 
 #include <openssl/crypto.h>  // OPENSSL_cleanse
+#include <openssl/err.h>     // ERR_clear_error
 #include <openssl/evp.h>     // EVP_PKEY_free
+#include <openssl/x509.h>    // EVP_PKEY2PKCS8 / i2d_PUBKEY
 #include <algorithm>
 #include <utility>
 
@@ -122,6 +124,51 @@ OpenSslKeyHandler::Export() const
 
     key_management::SecureKeyBytes out;
     out.bytes.assign(m_key_bytes.begin(), m_key_bytes.end());
+    return out;
+}
+
+::score::crypto::Expected<key_management::SecureKeyBytes, ::score::crypto::daemon::common::DaemonErrorCode>
+OpenSslKeyHandler::SerializeForStorage() const
+{
+    using ::score::crypto::daemon::common::DaemonErrorCode;
+    if (m_released)
+    {
+        return ::score::crypto::make_unexpected(DaemonErrorCode::kInternalError);
+    }
+
+    key_management::SecureKeyBytes out;
+    if (!m_pkey)
+    {
+        if (m_key_bytes.empty())
+        {
+            return ::score::crypto::make_unexpected(DaemonErrorCode::kInternalError);
+        }
+        out.bytes.assign(m_key_bytes.begin(), m_key_bytes.end());
+        return out;
+    }
+
+    unsigned char* der = nullptr;
+    int der_len = 0;
+    PKCS8_PRIV_KEY_INFO* p8 = EVP_PKEY2PKCS8(m_pkey.get());
+    if (p8 != nullptr)
+    {
+        der_len = i2d_PKCS8_PRIV_KEY_INFO(p8, &der);
+        PKCS8_PRIV_KEY_INFO_free(p8);
+    }
+    else
+    {
+        // No private half: store the public key, which ImportKey reads via d2i_PUBKEY.
+        ERR_clear_error();
+        der_len = i2d_PUBKEY(m_pkey.get(), &der);
+    }
+    if ((der_len <= 0) || (der == nullptr))
+    {
+        OPENSSL_free(der);
+        return ::score::crypto::make_unexpected(DaemonErrorCode::kOperationFailed);
+    }
+
+    out.bytes.assign(der, der + der_len);  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    OPENSSL_clear_free(der, static_cast<std::size_t>(der_len));
     return out;
 }
 

@@ -12,6 +12,7 @@
 # *******************************************************************************
 
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 
 # Header-only library: operation constants only (no key management infra deps)
 cc_library(
@@ -124,5 +125,16 @@ cc_library(
         "//score/crypto/src/daemon/data_manager",
         "//score/crypto/src/daemon/provider:provider_headers",
         "//score/crypto/src/daemon/provider:provider_manager",
+    ],
+)
+
+cc_test(
+    name = "file_backed_slot_handler_test",
+    srcs = ["slot/file_backed_slot_handler_test.cpp"],
+    deps = [
+        ":key_management",
+        ":key_management_headers",
+        "//score/crypto/src/daemon/common/storage:file_io",
+        "@googletest//:gtest_main",
     ],
 )

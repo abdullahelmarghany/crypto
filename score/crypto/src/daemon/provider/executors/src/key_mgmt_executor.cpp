@@ -250,7 +250,7 @@ KeyManagementExecutor::HandleImport(const KeyMgmtExecutionContext& ctx, common::
 // Parameter layout:
 //   client_id   – authenticated client (from InitializationParams)
 //   request[0]  = key_node_id (uint64_t)
-//   request[1]  = format      (uint32_t FormatType, optional)
+//   request[1]  = format      (uint32_t, operations::EncodeFormat(); optional)
 // Response:
 //   output[0]   = exported key bytes (OwnedBuffer)
 // ---------------------------------------------------------------------------
@@ -264,7 +264,7 @@ KeyManagementExecutor::HandleExport(const KeyMgmtExecutionContext& ctx, common::
         score::mw::log::LogError() << LOG_PREFIX << "HandleExport: invalid key node id";
         return score::crypto::make_unexpected(key_nid_res.error());
     }
-    auto format_res = km_parse::ExtractFormatOrDefault(request, 1U);
+    auto format_res = km_parse::ExtractOptionalFormat(request, 1U);
     if (!format_res.has_value())
     {
         score::mw::log::LogError() << LOG_PREFIX << "HandleExport: invalid format parameter";
@@ -340,7 +340,7 @@ KeyManagementExecutor::HandleExport(const KeyMgmtExecutionContext& ctx, common::
 // Parameter layout:
 //   client_id   – authenticated client (from InitializationParams)
 //   request[0]  = key_node_id (uint64_t)
-//   request[1]  = format      (uint32_t FormatType, optional)
+//   request[1]  = format      (uint32_t, operations::EncodeFormat(); optional)
 // Response:
 //   output[0]   = exported byte length (uint64_t)
 // ---------------------------------------------------------------------------
@@ -354,7 +354,7 @@ KeyManagementExecutor::HandleGetExportSize(const KeyMgmtExecutionContext& ctx, c
         score::mw::log::LogError() << LOG_PREFIX << "HandleGetExportSize: invalid key node id";
         return score::crypto::make_unexpected(key_nid_res.error());
     }
-    auto format_res = km_parse::ExtractFormatOrDefault(request, 1U);
+    auto format_res = km_parse::ExtractOptionalFormat(request, 1U);
     if (!format_res.has_value())
     {
         score::mw::log::LogError() << LOG_PREFIX << "HandleGetExportSize: invalid format parameter";

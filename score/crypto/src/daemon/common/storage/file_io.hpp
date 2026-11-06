@@ -50,6 +50,19 @@ namespace score::crypto::daemon::common::storage
     const std::string& path,
     score::crypto::span<const std::uint8_t> data);
 
+/// Create @p path with mode 0600 and write @p data to it atomically.
+///
+/// Fails if @p path already exists, so concurrent writers cannot overwrite each
+/// other. The path is first claimed with an empty owner-only placeholder
+/// (O_CREAT | O_EXCL), then filled through WriteFile; the atomic update keeps the
+/// placeholder's mode. The placeholder is removed if the write fails.
+///
+/// @return std::monostate on success; kResourceBusy if @p path already exists,
+///         otherwise the WriteFile errors.
+[[nodiscard]] score::crypto::Expected<std::monostate, DaemonErrorCode> WriteNewPrivateFile(
+    const std::string& path,
+    score::crypto::span<const std::uint8_t> data);
+
 /// Write primitive used by the storage components that persist files. Production code uses
 /// WriteFile. A test substitutes a writer to make a write succeed or fail at a chosen point.
 using FileWriter = std::function<score::crypto::Expected<std::monostate, DaemonErrorCode>(

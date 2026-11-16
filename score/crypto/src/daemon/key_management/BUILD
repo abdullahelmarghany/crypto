@@ -129,6 +129,15 @@ cc_library(
 )
 
 cc_test(
+    name = "key_types_test",
+    srcs = ["interfaces/key_types_test.cpp"],
+    deps = [
+        ":key_handler_iface",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "file_backed_slot_handler_test",
     srcs = ["slot/file_backed_slot_handler_test.cpp"],
     deps = [

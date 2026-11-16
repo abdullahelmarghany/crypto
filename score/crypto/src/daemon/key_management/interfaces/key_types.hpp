@@ -18,11 +18,13 @@
 #include "score/crypto/src/api/types/common.hpp"
 #include "score/crypto/src/api/types/key.hpp"
 #include "score/crypto/src/daemon/common/algorithm_catalog.hpp"
+#include "score/crypto/src/daemon/common/secure_memory.hpp"
 #include "score/crypto/src/daemon/common/types.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace score::crypto::daemon::key_management
@@ -218,16 +220,25 @@ struct SecureKeyBytes
 
     ~SecureKeyBytes()
     {
-        for (auto& b : bytes)
-        {
-            b = 0U;
-        }
+        common::SecureZeroizeAndClear(bytes);
     }
 
     SecureKeyBytes(const SecureKeyBytes&) = delete;
     SecureKeyBytes& operator=(const SecureKeyBytes&) = delete;
+
+    // Moving the vector hands over its buffer, so the source holds no key bytes afterwards.
     SecureKeyBytes(SecureKeyBytes&&) noexcept = default;
-    SecureKeyBytes& operator=(SecureKeyBytes&&) noexcept = default;
+
+    // The buffer being replaced is wiped before it is released.
+    SecureKeyBytes& operator=(SecureKeyBytes&& other) noexcept
+    {
+        if (this != &other)
+        {
+            common::SecureZeroizeAndClear(bytes);
+            bytes = std::move(other.bytes);
+        }
+        return *this;
+    }
 };
 
 // ---------------------------------------------------------------------------

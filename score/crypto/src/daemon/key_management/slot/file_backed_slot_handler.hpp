@@ -44,7 +44,7 @@ class FileBackedSlotHandler final : public IKeySlotHandler
     /// @param factory  Provider key factory used for ImportKey.
     /// @param writer   Creates the key file in StoreKey(); replaceable for tests.
     explicit FileBackedSlotHandler(IKeyFactory::Sptr factory,
-                                   common::storage::FileWriter writer = common::storage::WriteNewPrivateFile);
+                                   common::storage::FileWriter writer = common::storage::CreatePrivateFileIfAbsent);
 
     ~FileBackedSlotHandler() override = default;
 
@@ -69,7 +69,7 @@ class FileBackedSlotHandler final : public IKeySlotHandler
     ///
     /// Serialises the key with IKeyHandler::SerializeForStorage() (raw bytes for
     /// symmetric keys, DER for asymmetric keys) and creates key_properties[kKeyPath]
-    /// with mode 0600 through an atomic write. An existing key file is never
+    /// with mode 0600 through CreatePrivateFileIfAbsent. An existing key file is never
     /// replaced. The serialised buffer is zeroized before returning.
     ///
     /// @return kKeySlotOccupied if the key file already exists; kInvalidArgument

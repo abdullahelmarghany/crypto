@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <filesystem>
@@ -392,12 +393,24 @@ TEST_F(SecureEraseFileOsTest, OpenPermissionErrorIsAccessDenied)
     EXPECT_EQ(result.error(), DaemonErrorCode::kAccessDenied);
 }
 
-TEST(FileIoTest, NewPrivateFileIsOwnerOnlyAndReadable)
+/// Names of the entries in @p dir.
+std::vector<std::string> DirEntries(const std::filesystem::path& dir)
+{
+    std::vector<std::string> names;
+    for (const auto& entry : std::filesystem::directory_iterator{dir})
+    {
+        names.push_back(entry.path().filename().string());
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+TEST(FileIoTest, CreatedFileIsOwnerOnlyAndReadable)
 {
     const auto path = TestPath("private") / "nested" / "key.bin";
     const std::vector<std::uint8_t> data{0x01U, 0x02U, 0x03U};
 
-    const auto result = WriteNewPrivateFile(path.string(), {data.data(), data.size()});
+    const auto result = CreatePrivateFileIfAbsent(path.string(), {data.data(), data.size()});
 
     ASSERT_TRUE(result.has_value());
     const auto perms = std::filesystem::status(path).permissions();
@@ -406,27 +419,141 @@ TEST(FileIoTest, NewPrivateFileIsOwnerOnlyAndReadable)
     const auto read = ReadFile(path.string(), 1024U);
     ASSERT_TRUE(read.has_value());
     EXPECT_EQ(read.value(), data);
+    // The staging file is gone once the key is published.
+    EXPECT_EQ(DirEntries(path.parent_path()), std::vector<std::string>{"key.bin"});
     std::filesystem::remove_all(path.parent_path().parent_path());
 }
 
-TEST(FileIoTest, NewPrivateFileRefusesExistingFile)
+TEST(FileIoTest, CreateRefusesExistingFile)
 {
-    const auto path = TestPath("private_existing");
-    {
-        std::ofstream output{path};
-        ASSERT_TRUE(output.is_open());
-        output << "old";
-    }
+    const auto dir = TestPath("private_existing");
+    std::filesystem::create_directories(dir);
+    const auto path = dir / "key.bin";
+    WriteText(path, "old");
     const std::vector<std::uint8_t> data{0xAAU};
 
-    const auto result = WriteNewPrivateFile(path.string(), {data.data(), data.size()});
+    const auto result = CreatePrivateFileIfAbsent(path.string(), {data.data(), data.size()});
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), DaemonErrorCode::kResourceBusy);
     const auto read = ReadFile(path.string(), 1024U);
     ASSERT_TRUE(read.has_value());
     EXPECT_EQ(read.value(), (std::vector<std::uint8_t>{'o', 'l', 'd'}));
-    std::filesystem::remove(path);
+    EXPECT_EQ(DirEntries(dir), std::vector<std::string>{"key.bin"});
+    std::filesystem::remove_all(dir);
+}
+
+TEST(FileIoTest, PublishLosingRaceToExistingFileKeepsItAndDropsStagedData)
+{
+    const auto dir = TestPath("publish_race");
+    const auto path = dir / "key.bin";
+    const std::vector<std::uint8_t> data{0x11U, 0x22U};
+    auto staged = StagePrivateFile(path.string(), {data.data(), data.size()});
+    ASSERT_TRUE(staged.has_value());
+
+    // Another writer publishes first; link() then fails with EEXIST.
+    WriteText(path, "winner");
+    const auto result = PublishStagedFile(staged.value());
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), DaemonErrorCode::kResourceBusy);
+    const auto read = ReadFile(path.string(), 1024U);
+    ASSERT_TRUE(read.has_value());
+    EXPECT_EQ(read.value(), (std::vector<std::uint8_t>{'w', 'i', 'n', 'n', 'e', 'r'}));
+    EXPECT_FALSE(std::filesystem::exists(staged.value().temp_path));
+    std::filesystem::remove_all(dir);
+}
+
+TEST(FileIoTest, CrashBetweenWriteAndLinkLeavesNoFinalFileAndNextCreateCleansUp)
+{
+    const auto dir = TestPath("crash");
+    const auto path = dir / "key.bin";
+    const std::vector<std::uint8_t> lost{0x01U, 0x02U, 0x03U, 0x04U};
+
+    // Simulated crash: the data is staged but never published.
+    auto staged = StagePrivateFile(path.string(), {lost.data(), lost.size()});
+    ASSERT_TRUE(staged.has_value());
+    const auto exists = FileExists(path.string());
+    ASSERT_TRUE(exists.has_value());
+    EXPECT_FALSE(exists.value());
+    ASSERT_TRUE(std::filesystem::exists(staged.value().temp_path));
+    EXPECT_EQ(std::filesystem::status(staged.value().temp_path).permissions() & std::filesystem::perms::all,
+              std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+
+    const std::vector<std::uint8_t> data{0xA5U};
+    const auto result = CreatePrivateFileIfAbsent(path.string(), {data.data(), data.size()});
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(DirEntries(dir), std::vector<std::string>{"key.bin"});
+    const auto read = ReadFile(path.string(), 1024U);
+    ASSERT_TRUE(read.has_value());
+    EXPECT_EQ(read.value(), data);
+    std::filesystem::remove_all(dir);
+}
+
+TEST(FileIoTest, StaleCleanupRemovesOnlyOwnStagingFiles)
+{
+    const auto dir = TestPath("stale");
+    std::filesystem::create_directories(dir);
+    WriteText(dir / ".key.bin.stage.12.3", "stale");
+    WriteText(dir / ".key.bin.stage.x.3", "not a staging name");
+    WriteText(dir / ".key.bin.stage.12.3.bak", "not a staging name");
+    WriteText(dir / ".key.bin.1.stage.12.3", "staging file of key.bin.1");
+    WriteText(dir / ".other.bin.stage.12.3", "staging file of other.bin");
+    WriteText(dir / "key.bin.stage.12.3", "visible file");
+
+    RemoveStaleStagedFiles((dir / "key.bin").string());
+
+    EXPECT_EQ(DirEntries(dir),
+              (std::vector<std::string>{".key.bin.1.stage.12.3",
+                                        ".key.bin.stage.12.3.bak",
+                                        ".key.bin.stage.x.3",
+                                        ".other.bin.stage.12.3",
+                                        "key.bin.stage.12.3"}));
+    std::filesystem::remove_all(dir);
+}
+
+TEST(FileIoTest, StaleCleanupLeavesFileLargerThanAStagedFileUntouched)
+{
+    const auto dir = TestPath("stale_oversized");
+    std::filesystem::create_directories(dir);
+    const auto oversized = dir / ".key.bin.stage.12.3";
+    const std::string content(kMaxPrivateFileSize + 1U, 'K');
+    WriteText(oversized, content);
+
+    RemoveStaleStagedFiles((dir / "key.bin").string());
+
+    ASSERT_TRUE(std::filesystem::exists(oversized));
+    const auto remaining = ReadAll(oversized);
+    EXPECT_EQ(std::string(remaining.begin(), remaining.end()), content);
+    std::filesystem::remove_all(dir);
+}
+
+TEST(FileIoTest, StagingRefusesDataLargerThanMaxPrivateFileSize)
+{
+    const auto dir = TestPath("stage_oversized");
+    const std::vector<std::uint8_t> data(kMaxPrivateFileSize + 1U, 0x01U);
+
+    const auto staged = StagePrivateFile((dir / "key.bin").string(), {data.data(), data.size()});
+
+    ASSERT_FALSE(staged.has_value());
+    EXPECT_EQ(staged.error(), DaemonErrorCode::kInvalidArgument);
+    std::filesystem::remove_all(dir);
+}
+
+TEST(FileIoTest, StagingUsesHiddenSiblingOfFinalPath)
+{
+    const auto dir = TestPath("symlink");
+    std::filesystem::create_directories(dir);
+    const auto path = dir / "key.bin";
+    const std::vector<std::uint8_t> data{0x01U};
+
+    auto staged = StagePrivateFile(path.string(), {data.data(), data.size()});
+    ASSERT_TRUE(staged.has_value());
+    EXPECT_EQ(staged.value().final_path, path.string());
+    EXPECT_EQ(staged.value().temp_path.rfind((dir / ".key.bin.stage.").string(), 0U), 0U);
+    std::filesystem::remove(staged.value().temp_path);
+    std::filesystem::remove_all(dir);
 }
 
 }  // namespace

@@ -17,6 +17,7 @@
 #include "score/crypto/src/common/types.hpp"
 #include "score/crypto/src/daemon/common/daemon_error.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -50,16 +51,57 @@ namespace score::crypto::daemon::common::storage
     const std::string& path,
     score::crypto::span<const std::uint8_t> data);
 
-/// Create @p path with mode 0600 and write @p data to it atomically.
+/// Largest file StagePrivateFile writes (8 KiB). A staging-named file larger
+/// than this was not written by it, so cleanup leaves such a file untouched.
+constexpr std::size_t kMaxPrivateFileSize = 8U * 1024U;
+
+/// A file written next to its final path but not yet visible under it.
+struct StagedFile
+{
+    std::string temp_path;   ///< Hidden sibling ".<name>.stage.<pid>.<seq>" holding the data
+    std::string final_path;  ///< Path the data is published under
+};
+
+/// Write @p data to a new hidden sibling of @p path and fsync it.
 ///
-/// Fails if @p path already exists, so concurrent writers cannot overwrite each
-/// other. The path is first claimed with an empty owner-only placeholder
-/// (O_CREAT | O_EXCL), then filled through WriteFile; the atomic update keeps the
-/// placeholder's mode. The placeholder is removed if the write fails.
+/// Creates parent directories if needed. The staging file is created with
+/// O_CREAT | O_EXCL | O_NOFOLLOW and mode 0600. @p path itself is not touched.
+///
+/// @return The staged file; kInvalidArgument if path or data is empty or
+///         data is larger than kMaxPrivateFileSize, kInternalError if the directory cannot be created, kPersistFailed
+///         on a create or write failure (nothing is left behind).
+[[nodiscard]] score::crypto::Expected<StagedFile, DaemonErrorCode> StagePrivateFile(
+    const std::string& path,
+    score::crypto::span<const std::uint8_t> data);
+
+/// Publish @p staged under its final path unless that path already exists.
+///
+/// Hard-links the staging file to the final path, which fails atomically when
+/// the final path exists, then removes the staging file and fsyncs the
+/// directory. On failure the staging file is overwritten with zeros and removed.
+///
+/// @return std::monostate on success; kResourceBusy if the final path already
+///         exists, kPersistFailed on any other link failure.
+[[nodiscard]] score::crypto::Expected<std::monostate, DaemonErrorCode> PublishStagedFile(const StagedFile& staged);
+
+/// Remove staging files that StagePrivateFile left for @p path, e.g. after a
+/// crash between staging and publishing. Their contents are zeroed first.
+///
+/// Only names of the exact StagePrivateFile form are considered, so files of
+/// other paths in the same directory are never touched. A symlink, a
+/// non-regular file or a file larger than kMaxPrivateFileSize is left in place.
+void RemoveStaleStagedFiles(const std::string& path);
+
+/// Create @p path with mode 0600 holding @p data, unless it already exists.
+///
+/// Removes stale staging files for @p path, then StagePrivateFile() and
+/// PublishStagedFile(). A crash at any point leaves either no file or the
+/// complete file at @p path, never an empty or partial one. Calls are
+/// serialised within the process so that cleanup never races a store.
 ///
 /// @return std::monostate on success; kResourceBusy if @p path already exists,
-///         otherwise the WriteFile errors.
-[[nodiscard]] score::crypto::Expected<std::monostate, DaemonErrorCode> WriteNewPrivateFile(
+///         otherwise the StagePrivateFile / PublishStagedFile errors.
+[[nodiscard]] score::crypto::Expected<std::monostate, DaemonErrorCode> CreatePrivateFileIfAbsent(
     const std::string& path,
     score::crypto::span<const std::uint8_t> data);
 

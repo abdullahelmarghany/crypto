@@ -167,7 +167,7 @@ TEST_F(FileBackedSlotHandlerStoreTest, Store_GoesThroughInjectedWriterWithKeyPat
                       score::crypto::span<const std::uint8_t> data) -> score::crypto::Expected<std::monostate, Error> {
         written_path = path;
         written.assign(data.begin(), data.end());
-        return common::storage::WriteNewPrivateFile(path, data);
+        return common::storage::CreatePrivateFileIfAbsent(path, data);
     };
     FileBackedSlotHandler slot_handler{m_factory, writer};
     FakeKeyHandler key{m_key};

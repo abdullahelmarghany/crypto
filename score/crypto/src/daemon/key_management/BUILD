@@ -12,6 +12,7 @@
 # *******************************************************************************
 
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_test")
 
 # Header-only library: operation constants only (no key management infra deps)
 cc_library(
@@ -79,9 +80,11 @@ cc_library(
         "//score/crypto/types:types",
         "//score/crypto/config:context_configs",
         "//score/crypto/src/daemon/common",
+        "//score/crypto/src/daemon/common:algorithm_catalog",
+        "//score/crypto/src/daemon/common/context:context_mode",
         "//score/crypto/src/daemon/control_plane:request_handler_hdr",
         "//score/crypto/src/daemon/data_manager",
-        "//score/crypto/src/daemon/provider/handler:handler_headers",
+        "//score/crypto/src/daemon/common/context:handler_headers",
     ],
 )
 
@@ -108,15 +111,36 @@ cc_library(
     linkstatic = True,
     visibility = ["//:__subpackages__"],
     deps = [
+        ":key_handler_iface",
         ":key_management_headers",
         "//score/crypto/common:crypto_common",
         "//score/crypto/types:types",
         "//score/crypto/src/daemon/common",
+        "//score/crypto/src/daemon/common/context:context_types",
         "//score/crypto/src/daemon/common/storage:file_io",
         "//score/crypto/src/daemon/common/storage:kv_deployment",
         "//score/crypto/src/daemon/common:algorithm_catalog",
+        "//score/crypto/src/daemon/common:key_compatibility",
         "//score/crypto/src/daemon/data_manager",
         "//score/crypto/src/daemon/provider:provider_headers",
         "//score/crypto/src/daemon/provider:provider_manager",
+    ],
+)
+
+cc_test(
+    name = "key_management_service_test",
+    srcs = ["core/key_management_service_test.cpp"],
+    deps = [
+        ":key_handler_iface",
+        ":key_management",
+        ":key_management_headers",
+        "//score/crypto/types:key_types",
+        "//score/crypto/src/daemon/common",
+        "//score/crypto/src/daemon/common:algorithm_catalog",
+        "//score/crypto/src/daemon/config:config_types",
+        "//score/crypto/src/daemon/data_manager:data_manager",
+        "//score/crypto/src/daemon/provider:provider_headers",
+        "//score/crypto/src/daemon/provider:provider_manager",
+        "@googletest//:gtest_main",
     ],
 )
